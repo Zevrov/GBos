@@ -46,13 +46,20 @@ set(SKIP_INSTALL_ALL    ON  CACHE BOOL "" FORCE)
 
 add_subdirectory("${MGBA_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/mgba" EXCLUDE_FROM_ALL)
 
-add_library(pd_core STATIC csrc/pd_core.c)
+# EXPAND: the Android app's own pk_wide.c (the overworld drawn past the GBA's edges), compiled in as is.
+set(APP_CPP_DIR "${REPO_DIR}/app/src/main/cpp")
+add_library(pd_core STATIC csrc/pd_core.c "${APP_CPP_DIR}/pk_wide.c")
 # The same defines as mGBA's own sources: some of its structs change shape with them.
 target_compile_definitions(pd_core PRIVATE M_CORE_GBA M_CORE_GB)
+# pk_wide.c's fault guard is POSIX signals (sigsetjmp / sigaction): not on Windows, where it's built without it.
+if(WIN32)
+    target_compile_definitions(pd_core PRIVATE PK_WIDE_NO_GUARD)
+endif()
 if(NOT WIN32)
     target_compile_definitions(pd_core PRIVATE USE_PTHREADS)
 endif()
 target_include_directories(pd_core PRIVATE
+    "${APP_CPP_DIR}"
     "${MGBA_DIR}/include"
     "${MGBA_DIR}/src"
     "${CMAKE_CURRENT_BINARY_DIR}/mgba/include")

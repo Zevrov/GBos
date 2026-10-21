@@ -34,6 +34,10 @@ pub struct Settings {
     /// Fast-forward's sound effects and cries at their own pitch (shortened, in step with the game); false =
     /// sped up (higher, as the game makes them).
     pub ff_effects_pitch: bool,
+    /// SETTINGS > SCREEN: EXPAND, the overworld drawn past the GBA's edges (for the games it has tables for).
+    pub expand: bool,
+    /// ZOOM pulls back in for text boxes and menus too (battles always do).
+    pub expand_zoom_on_text: bool,
     /// The keyboard controls (SETTINGS > CONTROLS).
     pub keys: crate::controls::Keymap,
 }
@@ -49,6 +53,8 @@ impl Default for Settings {
             dev_panels: false,
             ff_sound: true,
             ff_effects_pitch: true,
+            expand: true,
+            expand_zoom_on_text: true,
             keys: Default::default(),
         }
     }

@@ -4,14 +4,17 @@
 mod app;
 mod audio;
 mod controls;
+mod crash;
 mod emu;
 mod music;
 mod panels;
 mod saves;
 mod settings;
+mod wide;
 mod wsola;
 
 fn main() -> eframe::Result<()> {
+    crash::install();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Adventure Pad")

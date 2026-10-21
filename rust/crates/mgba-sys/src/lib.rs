@@ -31,6 +31,27 @@ extern "C" {
     fn pd_core_state_to_memory(c: *mut PdCore, out: *mut *mut u8, len: *mut usize) -> bool;
     fn pd_core_state_from_memory(c: *mut PdCore, data: *const u8, len: usize) -> bool;
     fn pd_core_free(p: *mut std::os::raw::c_void);
+    fn pd_core_wide_knows(crc: u32) -> bool;
+    fn pd_core_wide_configure(c: *mut PdCore, crc: u32) -> bool;
+    fn pd_core_wide_set_view(c: *mut PdCore, x: c_int, y: c_int, w: c_int, h: c_int);
+    fn pd_core_wide_set_draw(c: *mut PdCore, draw: bool);
+    fn pd_core_wide_pixels(c: *const PdCore, w: *mut c_int, h: *mut c_int) -> *const u8;
+    fn pd_core_wide_scene(c: *const PdCore) -> c_int;
+    fn pd_core_wide_fault(c: *const PdCore) -> std::os::raw::c_ulong;
+    fn pd_core_set_guarded(c: *mut PdCore, guarded: bool);
+    fn pd_core_dead(c: *const PdCore) -> std::os::raw::c_ulong;
+    fn pd_core_test_fault(c: *mut PdCore);
+    fn pd_core_wide_test_fault(c: *mut PdCore);
+    fn pd_core_guard_selftest() -> std::os::raw::c_ulong;
+    fn pd_crash_log_install(log: *const c_char, flag: *const c_char);
+}
+
+/// A native crash nothing caught goes to the log at `log` (one line: the exception, and where), and leaves the
+/// file `flag` for the next launch to find. Windows only (elsewhere it does nothing).
+pub fn install_crash_log(log: &Path, flag: &Path) {
+    if let (Some(l), Some(f)) = (c_path(log), c_path(flag)) {
+        unsafe { pd_crash_log_install(l.as_ptr(), f.as_ptr()) }
+    }
 }
 
 /// The rate [`Core::read_audio`]'s samples play at.
@@ -210,6 +231,76 @@ impl Core {
     /// Loads a [`Core::state_bytes`] copy.
     pub fn load_state_bytes(&mut self, state: &[u8]) -> bool {
         unsafe { pd_core_state_from_memory(self.raw, state.as_ptr(), state.len()) }
+    }
+
+    /// EXPAND (the Android app's pk_wide.c) has tables for the ROM with this CRC32.
+    pub fn wide_knows(crc: u32) -> bool {
+        unsafe { pd_core_wide_knows(crc) }
+    }
+
+    /// EXPAND draws this game (its ROM's CRC32; 0 = off). False if it can't. One core at a time: the player's.
+    pub fn wide_configure(&mut self, crc: u32) -> bool {
+        unsafe { pd_core_wide_configure(self.raw, crc) }
+    }
+
+    /// The window EXPAND draws from the next frame on, in the game frame's pixels ((0, 0) its top-left, the
+    /// frame 240 x 160); w 0 = none (the plain frame).
+    pub fn wide_set_view(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        unsafe { pd_core_wide_set_view(self.raw, x, y, w, h) }
+    }
+
+    /// Whether the next frame is shown: false only keeps EXPAND's tracking up (fast-forward's unseen frames).
+    pub fn wide_set_draw(&mut self, draw: bool) {
+        unsafe { pd_core_wide_set_draw(self.raw, draw) }
+    }
+
+    /// The last frame's EXPAND window, R G B X per pixel, with its size; None when it wasn't drawn wide.
+    pub fn wide_pixels(&self) -> Option<(&[u8], usize, usize)> {
+        let (mut w, mut h) = (0, 0);
+        let p = unsafe { pd_core_wide_pixels(self.raw, &mut w, &mut h) };
+        if p.is_null() || w <= 0 || h <= 0 {
+            return None;
+        }
+        let (w, h) = (w as usize, h as usize);
+        // The buffer holds the largest window; the last frame used w * h of it, row by row.
+        Some((unsafe { std::slice::from_raw_parts(p, w * h * 4) }, w, h))
+    }
+
+    /// What the last frame was, for ZOOM (pk_wide.h's PK_WIDE_SCENE_*); 4 (off the map) when EXPAND is off.
+    pub fn wide_scene(&self) -> i32 {
+        unsafe { pd_core_wide_scene(self.raw) }
+    }
+
+    /// The fault that switched EXPAND off for this game (a Windows exception code; 0 = none).
+    pub fn wide_fault(&self) -> u32 {
+        unsafe { pd_core_wide_fault(self.raw) as u32 }
+    }
+
+    /// Runs this core's frames, calls and state loads under the fault guard (Windows): a fault in them leaves the
+    /// core dead ([`Core::dead`]) instead of taking the process down. For helper cores, never the player's game.
+    pub fn set_guarded(&mut self, guarded: bool) {
+        unsafe { pd_core_set_guarded(self.raw, guarded) }
+    }
+
+    /// The fault that killed this guarded core (a Windows exception code), or None. A dead core does nothing.
+    pub fn dead(&self) -> Option<u32> {
+        let f = unsafe { pd_core_dead(self.raw) } as u32;
+        (f != 0).then_some(f)
+    }
+
+    /// Tests: a fault inside this core's guarded work.
+    pub fn test_fault(&mut self) {
+        unsafe { pd_core_test_fault(self.raw) }
+    }
+
+    /// Tests: EXPAND's next frame faults (inside its guard).
+    pub fn wide_test_fault(&mut self) {
+        unsafe { pd_core_wide_test_fault(self.raw) }
+    }
+
+    /// The guard catching a deliberate fault on its own: its exception code (0 where there's no guard).
+    pub fn guard_selftest() -> u32 {
+        unsafe { pd_core_guard_selftest() as u32 }
     }
 
     /// Parks the game's main loop on the Thumb `b .` at `spin`: only its interrupts (the sound engine) run on.

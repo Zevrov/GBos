@@ -25,11 +25,18 @@ pub enum Control {
     LoadState,
     PrevSlot,
     NextSlot,
+    /// EXPAND's ZOOM: the next step out.
+    Zoom,
+    /// EXPAND's look-around (the Android app's right stick).
+    LookUp,
+    LookDown,
+    LookLeft,
+    LookRight,
 }
 
 impl Control {
     /// In the order SETTINGS lists them.
-    pub const ALL: [Control; 16] = [
+    pub const ALL: [Control; 21] = [
         Control::Up,
         Control::Down,
         Control::Left,
@@ -46,6 +53,11 @@ impl Control {
         Control::LoadState,
         Control::PrevSlot,
         Control::NextSlot,
+        Control::Zoom,
+        Control::LookUp,
+        Control::LookDown,
+        Control::LookLeft,
+        Control::LookRight,
     ];
 
     pub fn label(self) -> &'static str {
@@ -66,6 +78,11 @@ impl Control {
             Control::LoadState => "LOAD STATE",
             Control::PrevSlot => "PREVIOUS SLOT",
             Control::NextSlot => "NEXT SLOT",
+            Control::Zoom => "ZOOM (EXPAND)",
+            Control::LookUp => "LOOK UP (EXPAND)",
+            Control::LookDown => "LOOK DOWN (EXPAND)",
+            Control::LookLeft => "LOOK LEFT (EXPAND)",
+            Control::LookRight => "LOOK RIGHT (EXPAND)",
         }
     }
 
@@ -104,6 +121,11 @@ impl Control {
             Control::LoadState => Key::F7,
             Control::PrevSlot => Key::F6,
             Control::NextSlot => Key::F8,
+            Control::Zoom => Key::Q,
+            Control::LookUp => Key::I,
+            Control::LookDown => Key::K,
+            Control::LookLeft => Key::J,
+            Control::LookRight => Key::L,
         }
     }
 }
@@ -156,8 +178,8 @@ mod tests {
     fn defaults_until_rebound() {
         let mut m = Keymap::default();
         assert_eq!(m.key(Control::A), Some(Key::Z));
-        assert_eq!(m.bind(Control::A, Key::J), None);
-        assert_eq!(m.key(Control::A), Some(Key::J));
+        assert_eq!(m.bind(Control::A, Key::G), None);
+        assert_eq!(m.key(Control::A), Some(Key::G));
         m.reset();
         assert_eq!(m.key(Control::A), Some(Key::Z));
     }

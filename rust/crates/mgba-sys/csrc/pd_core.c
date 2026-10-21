@@ -17,6 +17,12 @@
 #include <mgba/internal/gb/gb.h>
 #include <mgba/internal/gba/gba.h>
 
+#include "pk_wide.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #define PD_AUDIO_SCRATCH 8192   /* per channel */
 
 struct PdCore {
@@ -27,7 +33,86 @@ struct PdCore {
     bool saveReadOnly;
     int16_t audio[PD_AUDIO_SCRATCH * 2];
     size_t audioAvail;
+    /* EXPAND (pk_wide.c): the window around the frame with the rebuilt scene, wideW x wideH (0 = not drawn: the
+     * screen shows `video`). pk_wide.c keeps one game's state, so one core at a time uses it (the player's). */
+    uint32_t* wide;
+    int wideW, wideH;
+    uint32_t wideCrc;          /* the game EXPAND draws (its ROM's CRC32; 0 = off) */
+    int viewX, viewY, viewW, viewH;
+    bool wideSkipNext;         /* the next frame won't be shown: only noted (pk_wide_skip) */
+    bool wideSkipped;          /* the last frame was only noted: wide / wideW still hold the one before */
+    unsigned long wideFault;   /* the fault that switched EXPAND off (pd_guard), 0 = none */
+    bool wideTestFault;        /* tests: EXPAND's next frame faults */
+    /* A helper core (fast-forward's music and shadow cores) runs under pd_guard: a fault in it leaves the core
+     * dead - every call a no-op from then on, never torn down (its state is whatever the fault left) - and the
+     * player's game goes on. */
+    bool guarded;
+    unsigned long dead;
 };
+
+/* pk_wide.c keeps one game's state (and hooks one renderer): the one core that has EXPAND on. Another core asking
+ * while it does is refused; closing it, or switching it off, lets the next one have it. */
+static PdCore* volatile wideOwner;
+
+/* --- the fault guard -------------------------------------------------------------------------------------
+ * What pk_wide.c's POSIX guard does on Android (sigsetjmp / sigaction), for Windows: a vectored exception handler
+ * that acts only while this thread is inside pd_guard, and jumps back out of it (GCC's __builtin_longjmp, as the
+ * signal handler's siglongjmp). A fault anywhere else goes on to Windows as if this weren't here. Elsewhere
+ * (Linux, macOS) pd_guard just calls through for now. */
+
+typedef void (*PdGuarded)(void* arg);
+
+#ifdef _WIN32
+static __thread void* guardBuf[5];          /* __builtin_setjmp's buffer: five words */
+static __thread volatile int guardOn;
+static __thread volatile unsigned long guardCode;
+static volatile LONG guardInstalled;
+
+static LONG CALLBACK guardHandler(EXCEPTION_POINTERS* e) {
+    if (!guardOn) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = e->ExceptionRecord->ExceptionCode;
+    switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_PRIV_INSTRUCTION:
+        break;
+    default:
+        return EXCEPTION_CONTINUE_SEARCH;   /* not a crash (a debugger's breakpoint, a C++ throw...) */
+    }
+    guardOn = 0;
+    guardCode = code;
+    __builtin_longjmp(guardBuf, 1);
+}
+
+/* Runs fn(arg); 0 if it returned, else the fault (a Windows exception code) that cut it short. */
+static unsigned long __attribute__((noinline)) pd_guard(PdGuarded fn, void* arg) {
+    if (!guardInstalled && !InterlockedExchange(&guardInstalled, 1)) AddVectoredExceptionHandler(1, guardHandler);
+    if (__builtin_setjmp(guardBuf)) return guardCode ? guardCode : 1;
+    guardCode = 0;
+    guardOn = 1;
+    fn(arg);
+    guardOn = 0;
+    return 0;
+}
+#else
+static unsigned long pd_guard(PdGuarded fn, void* arg) {
+    fn(arg);
+    return 0;
+}
+#endif
+
+static void selftestFault(void* arg) {
+    (void) arg;
+    *(volatile int*) (uintptr_t) 0x10 = 1;   /* an access violation, on purpose */
+}
+
+unsigned long pd_core_guard_selftest(void) {
+    return pd_guard(selftestFault, NULL);
+}
 
 static bool isGba(const struct mCore* core) { return core && core->platform(core) == mPLATFORM_GBA; }
 
@@ -106,10 +191,20 @@ PdCore* pd_core_open(const char* romPath, const char* savePath) {
 
 void pd_core_close(PdCore* c) {
     if (!c) return;
+    /* A core that faulted is left as it is: tearing down whatever state the fault left could fault again. */
+    if (c->dead) {
+        if (wideOwner == c) wideOwner = NULL;
+        return;
+    }
     /* Unloads the ROM and flushes the save. The core owns the save's VFile from loadSave on and closes it here
      * (GBADestroy / GBDestroy: savedata.realVf, sramRealVf): closing it again was a double free. */
+    if (wideOwner == c) {
+        pk_wide_configure(0);
+        wideOwner = NULL;
+    }
     if (c->core) c->core->deinit(c->core);
     else if (c->saveVf) c->saveVf->close(c->saveVf);
+    free(c->wide);
     free(c->video);
     free(c);
 }
@@ -143,10 +238,129 @@ static void drainAudio(PdCore* c) {
     }
 }
 
+struct WideJob {
+    PdCore* c;
+    struct PkWideView v;
+    bool skip;
+};
+
+static void selftestFault(void* arg);
+
+static void wideJob(void* arg) {
+    struct WideJob* j = arg;
+    if (j->c->wideTestFault) {
+        j->c->wideTestFault = false;
+        selftestFault(NULL);
+    }
+    if (j->skip) pk_wide_skip(j->c->core, (const uint32_t*) j->c->video);
+    else pk_wide_view(j->c->core, (const uint32_t*) j->c->video, j->c->wide, j->v, NULL);
+}
+
+static void runFrameInner(PdCore* c);
+
+static void runFrameJob(void* arg) {
+    runFrameInner(arg);
+}
+
 void pd_core_run_frame(PdCore* c) {
-    if (!c || !c->core) return;
+    if (!c || !c->core || c->dead) return;
+    if (c->guarded) {
+        unsigned long f = pd_guard(runFrameJob, c);
+        if (f) c->dead = f;
+        return;
+    }
+    runFrameInner(c);
+}
+
+static void runFrameInner(PdCore* c) {
     c->core->runFrame(c->core);
     drainAudio(c);
+    /* EXPAND: only with a game it knows and a window set (pkRunFrame in pokedaisy_jni.c). */
+    struct PkWideView v = { c->viewX, c->viewY, c->viewW, c->viewH };
+    bool on = c->wide && c->wideCrc && v.w > 0 && v.h > 0 && v.w <= PK_WIDE_MAX_VIEW_W && v.h <= PK_WIDE_MAX_VIEW_H &&
+        sizeof(color_t) == 4 && c->vw == PK_WIDE_W && c->vh == PK_WIDE_H;
+    c->wideSkipped = false;
+    if (on) {
+        /* A fault in pk_wide.c (a bad table, a game state it didn't expect) switches EXPAND off for this game and
+         * the frame goes on plain - instead of taking the app down. */
+        struct WideJob job = { c, v, c->wideSkipNext };
+        unsigned long f = pd_guard(wideJob, &job);
+        if (f || pk_wide_fault()) {
+            c->wideFault = f ? f : (unsigned long) pk_wide_fault();
+            pk_wide_configure(0);
+            wideOwner = NULL;
+            c->wideCrc = 0;
+            c->wideW = c->wideH = 0;
+        } else if (job.skip) {
+            c->wideSkipped = true;
+        } else {
+            c->wideW = v.w;
+            c->wideH = v.h;
+        }
+    } else {
+        c->wideW = c->wideH = 0;
+    }
+}
+
+bool pd_core_wide_knows(uint32_t crc) { return pk_wide_knows(crc) != 0; }
+
+bool pd_core_wide_configure(PdCore* c, uint32_t crc) {
+    if (!c || !c->core) return false;
+    uint32_t want = isGba(c->core) ? crc : 0;
+    if (want && wideOwner && wideOwner != c) return false;
+    if (want == c->wideCrc) return want != 0;
+    if (want && !c->wide) c->wide = calloc((size_t) PK_WIDE_MAX_VIEW_W * PK_WIDE_MAX_VIEW_H, sizeof(uint32_t));
+    c->wideCrc = want && c->wide && pk_wide_configure(want) ? want : 0;
+    if (c->wideCrc) {
+        wideOwner = c;
+    } else {
+        if (wideOwner == c) {
+            pk_wide_configure(0);
+            wideOwner = NULL;
+        }
+        c->wideW = c->wideH = 0;
+    }
+    return c->wideCrc != 0;
+}
+
+void pd_core_wide_set_view(PdCore* c, int x, int y, int w, int h) {
+    if (!c) return;
+    c->viewX = x;
+    c->viewY = y;
+    c->viewW = w < 0 ? 0 : w > PK_WIDE_MAX_VIEW_W ? PK_WIDE_MAX_VIEW_W : w;
+    c->viewH = h < 0 ? 0 : h > PK_WIDE_MAX_VIEW_H ? PK_WIDE_MAX_VIEW_H : h;
+}
+
+void pd_core_wide_set_draw(PdCore* c, bool draw) { if (c) c->wideSkipNext = !draw; }
+
+const uint8_t* pd_core_wide_pixels(const PdCore* c, int* w, int* h) {
+    if (!c || !c->wide || c->wideW <= 0 || c->wideSkipped) { *w = *h = 0; return NULL; }
+    *w = c->wideW;
+    *h = c->wideH;
+    return (const uint8_t*) c->wide;
+}
+
+int pd_core_wide_scene(const PdCore* c) { return c && c->wideW ? pk_wide_scene() : PK_WIDE_SCENE_OFF; }
+
+unsigned long pd_core_wide_fault(const PdCore* c) { return c ? c->wideFault : 0; }
+
+void pd_core_set_guarded(PdCore* c, bool guarded) { if (c) c->guarded = guarded; }
+
+unsigned long pd_core_dead(const PdCore* c) { return c ? c->dead : 0; }
+
+static void testFaultJob(void* arg) {
+    (void) arg;
+    selftestFault(NULL);
+}
+
+/* Tests: EXPAND's next frame faults, inside pk_wide's guard. */
+void pd_core_wide_test_fault(PdCore* c) { if (c) c->wideTestFault = true; }
+
+/* Tests: a fault inside this core's guarded work, as a real one would leave it. */
+void pd_core_test_fault(PdCore* c) {
+    if (!c) return;
+    unsigned long f = pd_guard(testFaultJob, c);
+    if (f && c->guarded) c->dead = f;
 }
 
 size_t pd_core_read_audio(PdCore* c, int16_t* out, size_t cap) {
@@ -192,6 +406,7 @@ bool pd_core_load_state(PdCore* c, const char* path) {
     bool ok = mCoreLoadStateNamed(c->core, vf, SAVESTATE_SAVEDATA | SAVESTATE_RTC);
     vf->close(vf);
     if (ok) healRtc(c->core);
+    if (c->wideCrc) pk_wide_reset();   /* the RAM it kept from the last frame is another moment's */
     return ok;
 }
 
@@ -257,7 +472,31 @@ bool pd_core_read(PdCore* c, uint32_t addr, uint8_t* dst, size_t len) {
  * (registers, pipeline, halt, the fetch region and the idle-loop detector): a frame can end anywhere, and a
  * bare PC hijack clobbered the game's live registers. Runs instruction by instruction with IRQs masked until
  * the call returns to PD_CALL_SENTINEL, then puts everything back. */
+struct CallJob {
+    PdCore* c;
+    uint32_t fn;
+    const uint32_t* args;
+    uint32_t* r0;
+    bool ok;
+};
+
+static bool callInner(PdCore* c, uint32_t fn, const uint32_t args[4], uint32_t* r0);
+
+static void callJob(void* arg) {
+    struct CallJob* j = arg;
+    j->ok = callInner(j->c, j->fn, j->args, j->r0);
+}
+
 bool pd_core_call(PdCore* c, uint32_t fn, const uint32_t args[4], uint32_t* r0) {
+    if (!c || c->dead) return false;
+    if (!c->guarded) return callInner(c, fn, args, r0);
+    struct CallJob j = { c, fn, args, r0, false };
+    unsigned long f = pd_guard(callJob, &j);
+    if (f) c->dead = f;
+    return !f && j.ok;
+}
+
+static bool callInner(PdCore* c, uint32_t fn, const uint32_t args[4], uint32_t* r0) {
     if (!c || !c->core || !isGba(c->core)) return false;
     struct mCore* core = c->core;
     struct ARMCore* cpu = (struct ARMCore*) core->cpu;
@@ -318,7 +557,29 @@ bool pd_core_call(PdCore* c, uint32_t fn, const uint32_t args[4], uint32_t* r0) 
 /* Parks the main loop on `spin` (a Thumb `b .`) so the booted game can't change the music; the VBlank
  * interrupt keeps the sound engine running. Steps first until the CPU is in the main context with the VBlank
  * IRQ fully enabled (IME, IE bit 0, DISPSTAT bit 3): parked with it off, the music froze. */
+struct ParkJob {
+    PdCore* c;
+    uint32_t spin;
+    bool ok;
+};
+
+static bool parkInner(PdCore* c, uint32_t spin);
+
+static void parkJob(void* arg) {
+    struct ParkJob* j = arg;
+    j->ok = parkInner(j->c, j->spin);
+}
+
 bool pd_core_park(PdCore* c, uint32_t spin) {
+    if (!c || c->dead) return false;
+    if (!c->guarded) return parkInner(c, spin);
+    struct ParkJob j = { c, spin, false };
+    unsigned long f = pd_guard(parkJob, &j);
+    if (f) c->dead = f;
+    return !f && j.ok;
+}
+
+static bool parkInner(PdCore* c, uint32_t spin) {
     if (!c || !c->core || !isGba(c->core)) return false;
     struct mCore* core = c->core;
     struct ARMCore* cpu = (struct ARMCore*) core->cpu;
@@ -373,7 +634,30 @@ bool pd_core_state_to_memory(PdCore* c, uint8_t** out, size_t* len) {
     return ok;
 }
 
+struct LoadJob {
+    PdCore* c;
+    const uint8_t* data;
+    size_t len;
+    bool ok;
+};
+
+static bool stateFromMemoryInner(PdCore* c, const uint8_t* data, size_t len);
+
+static void loadJob(void* arg) {
+    struct LoadJob* j = arg;
+    j->ok = stateFromMemoryInner(j->c, j->data, j->len);
+}
+
 bool pd_core_state_from_memory(PdCore* c, const uint8_t* data, size_t len) {
+    if (!c || c->dead) return false;
+    if (!c->guarded) return stateFromMemoryInner(c, data, len);
+    struct LoadJob j = { c, data, len, false };
+    unsigned long f = pd_guard(loadJob, &j);
+    if (f) c->dead = f;
+    return !f && j.ok;
+}
+
+static bool stateFromMemoryInner(PdCore* c, const uint8_t* data, size_t len) {
     if (!c || !c->core || !data) return false;
     struct VFile* vf = VFileFromConstMemory(data, len);
     if (!vf) return false;
@@ -383,3 +667,45 @@ bool pd_core_state_from_memory(PdCore* c, const uint8_t* data, size_t len) {
 }
 
 void pd_core_free(void* p) { free(p); }
+
+/* --- the crash log ----------------------------------------------------------------------------------------
+ * A native crash nothing caught (the fault guard only covers EXPAND and the helper cores): one line in the log
+ * (the exception, and where: module + offset), and the flag the next launch looks for. Then Windows ends the
+ * process as it would have. */
+#ifdef _WIN32
+static wchar_t crashLog[MAX_PATH * 2];
+static wchar_t crashFlag[MAX_PATH * 2];
+
+static LONG WINAPI crashFilter(EXCEPTION_POINTERS* e) {
+    FILE* f = _wfopen(crashLog, L"a");
+    if (f) {
+        void* at = e->ExceptionRecord->ExceptionAddress;
+        HMODULE m = NULL;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR) at, &m)) {
+            GetModuleFileNameA(m, name, sizeof(name));
+        }
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d native crash: exception 0x%08lx at %p (%s + 0x%llx)\n\n", t.wYear,
+                t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, (unsigned long) e->ExceptionRecord->ExceptionCode, at,
+                name, (unsigned long long) ((char*) at - (char*) m));
+        fclose(f);
+    }
+    FILE* flag = _wfopen(crashFlag, L"w");
+    if (flag) fclose(flag);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void pd_crash_log_install(const char* logUtf8, const char* flagUtf8) {
+    MultiByteToWideChar(CP_UTF8, 0, logUtf8, -1, crashLog, MAX_PATH * 2);
+    MultiByteToWideChar(CP_UTF8, 0, flagUtf8, -1, crashFlag, MAX_PATH * 2);
+    SetUnhandledExceptionFilter(crashFilter);
+}
+#else
+void pd_crash_log_install(const char* logUtf8, const char* flagUtf8) {
+    (void) logUtf8;
+    (void) flagUtf8;
+}
+#endif

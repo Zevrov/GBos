@@ -25,6 +25,8 @@ pub struct Frame {
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
+    /// EXPAND drew it: where the window goes on the view (else None: the plain frame, fitted).
+    pub window: Option<crate::wide::Window>,
     /// New for every frame published.
     pub seq: u64,
 }
@@ -50,6 +52,17 @@ pub struct Shared {
     pub paused: AtomicBool,
     /// The music core is up: fast-forward plays the song at its normal speed (else in slices, FastSound).
     pub steady_music: AtomicBool,
+    /// SETTINGS > SCREEN: EXPAND on, and ZOOM's close-ups for text boxes and menus.
+    pub expand: AtomicBool,
+    pub zoom_on_text: AtomicBool,
+    /// EXPAND has tables for this game and draws it (set by the thread).
+    pub expanding: AtomicBool,
+    /// The game view's size in screen pixels (the UI sets it each frame), for ZOOM's steps.
+    pub view_w: AtomicU32,
+    pub view_h: AtomicU32,
+    /// The look-around, -1..1 per axis as f32 bits (right / down positive).
+    pub look_x: AtomicU32,
+    pub look_y: AtomicU32,
     /// Set by the thread when it's done (closed, or the game didn't load).
     pub ended: AtomicBool,
     pub error: Mutex<Option<String>>,
@@ -70,6 +83,11 @@ enum Cmd {
         frames: u32,
     },
     Reset,
+    /// ZOOM: the next step out (back to 1x after the last).
+    Zoom,
+    /// Tests: a panic in the emulator thread.
+    #[cfg(test)]
+    TestPanic,
     Quit,
 }
 
@@ -118,6 +136,7 @@ impl Session {
                 rom,
                 rom_bytes: info.rom.clone(),
                 platform: info.platform,
+                crc: info.crc32,
                 save,
                 states_dir: states_dir.clone(),
                 shared: shared.clone(),
@@ -125,9 +144,20 @@ impl Session {
                 ring,
                 wake: Box::new(wake),
             };
+            // A panic in the emulator thread ends the game with a message (in crash.log, with where it was) instead
+            // of leaving the window waiting on a thread that's gone. The in-game saves are already in the file.
+            let on_panic = shared.clone();
             std::thread::Builder::new()
                 .name("adventurepad-emu".into())
-                .spawn(move || job.run(rx))
+                .spawn(move || {
+                    if let Err(e) = crate::crash::caught(std::panic::AssertUnwindSafe(|| job.run(rx))) {
+                        let msg = crate::crash::message(e.as_ref());
+                        *on_panic.error.lock().unwrap_or_else(|p| p.into_inner()) = Some(format!(
+                            "The game stopped because of a problem ({msg}). Your in-game saves are safe; the                              details are in crash.log in the app's folder."
+                        ));
+                        on_panic.ended.store(true, Ordering::SeqCst);
+                    }
+                })
                 .expect("emulator thread")
         };
         Session {
@@ -155,6 +185,16 @@ impl Session {
         let _ = self.tx.send(Cmd::Reset);
     }
 
+    #[cfg(test)]
+    fn test_panic(&self) {
+        let _ = self.tx.send(Cmd::TestPanic);
+    }
+
+    /// ZOOM: the next step out.
+    pub fn zoom(&self) {
+        let _ = self.tx.send(Cmd::Zoom);
+    }
+
     /// The settings the running game follows: fast-forward's speed and sound.
     pub fn apply(&self, settings: &crate::settings::Settings) {
         self.shared
@@ -166,6 +206,10 @@ impl Session {
         self.shared
             .ff_effects_pitch
             .store(settings.ff_effects_pitch, Ordering::Relaxed);
+        self.shared.expand.store(settings.expand, Ordering::Relaxed);
+        self.shared
+            .zoom_on_text
+            .store(settings.expand_zoom_on_text, Ordering::Relaxed);
     }
 
     /// Stops the game where it is (SETTINGS open), or lets it go on.
@@ -278,7 +322,9 @@ struct Shadow {
 const SHADOW_RESYNC: u32 = 300;
 
 impl Shadow {
-    fn new(core: Core) -> Shadow {
+    fn new(mut core: Core) -> Shadow {
+        // A throwaway copy: a fault in it (the fault guard, pd_core.c) only ends fast-forward's effects.
+        core.set_guarded(true);
         Shadow {
             core,
             mute: MusicMute::default(),
@@ -346,6 +392,7 @@ struct Job {
     rom: PathBuf,
     rom_bytes: Arc<[u8]>,
     platform: Platform,
+    crc: u32,
     save: PathBuf,
     states_dir: PathBuf,
     shared: Arc<Shared>,
@@ -360,6 +407,7 @@ impl Job {
             rom,
             rom_bytes,
             platform,
+            crc,
             save,
             states_dir,
             shared,
@@ -399,6 +447,13 @@ impl Job {
         // While fast-forwarding with the music core, the sound effects and cries come from the shadow core,
         // gathered here until the next 1x music frame mixes them in.
         let mut shadow: Option<Shadow> = None;
+        // EXPAND (pk_wide.c through the bridge): the games it has tables for; the camera (ZOOM, the look-around).
+        let wide_known = platform == Platform::Gba && Core::wide_knows(crc);
+        let mut wide_on = false;
+        let mut camera = crate::wide::Camera::new();
+        let mut camera_at = Instant::now();
+        let mut window: Option<crate::wide::Window> = None;
+        let mut wide_fault_told = false;
         let mut effects: Vec<i16> = Vec::new();
         let mut wsola = crate::wsola::Wsola::default();
 
@@ -447,6 +502,7 @@ impl Job {
                     });
                 }
                 Ok(Cmd::LoadState(slot)) => {
+                    camera.reset();
                     if let Some(sh) = &mut shadow {
                         sh.stale = true;
                     }
@@ -461,6 +517,25 @@ impl Job {
                 Ok(Cmd::Press { buttons, frames }) => {
                     pressed = buttons & 0x3FF;
                     press_left = frames.min(600);
+                }
+                #[cfg(test)]
+                Ok(Cmd::TestPanic) => panic!("a test panic in the emulator thread"),
+                Ok(Cmd::Zoom) => {
+                    if wide_on {
+                        let (vw, vh) = (
+                            shared.view_w.load(Ordering::Relaxed),
+                            shared.view_h.load(Ordering::Relaxed),
+                        );
+                        let more = camera.cycle(vw as f32, vh as f32);
+                        shared.notice(if more > 1.01 {
+                            format!("ZOOM {more:.2}x")
+                        } else {
+                            "ZOOM 1x".to_owned()
+                        });
+                    } else {
+                        shared
+                            .notice("ZOOM needs EXPAND on (SETTINGS > SCREEN), in a game it knows");
+                    }
                 }
                 Ok(Cmd::Reset) => {
                     // A soft reset the way the games take it: A + B + START + SELECT.
@@ -513,8 +588,45 @@ impl Job {
                 }
                 _ => {}
             }
+            // EXPAND: on or off as SETTINGS has it, the camera's window for this frame, drawn only when it's shown.
+            let want_wide = wide_known && shared.expand.load(Ordering::Relaxed);
+            if want_wide != wide_on {
+                wide_on = core.wide_configure(if want_wide { crc } else { 0 });
+                shared.expanding.store(wide_on, Ordering::Relaxed);
+                camera.reset();
+                window = None;
+            }
+            if wide_on {
+                use mgba_sys::key::{DOWN, LEFT, RIGHT, UP};
+                camera.walking = keys & (UP | DOWN | LEFT | RIGHT) != 0;
+                camera.look_x = f32::from_bits(shared.look_x.load(Ordering::Relaxed));
+                camera.look_y = f32::from_bits(shared.look_y.load(Ordering::Relaxed));
+                camera.zoom_on_text = shared.zoom_on_text.load(Ordering::Relaxed);
+                let now = Instant::now();
+                let dt = now.duration_since(camera_at).as_secs_f32();
+                camera_at = now;
+                let (vw, vh) = (
+                    shared.view_w.load(Ordering::Relaxed),
+                    shared.view_h.load(Ordering::Relaxed),
+                );
+                window = camera.frame(vw as f32, vh as f32, core.wide_scene(), dt);
+                match window {
+                    Some(w) => core.wide_set_view(w.x, w.y, w.w, w.h),
+                    None => core.wide_set_view(0, 0, 0, 0),
+                }
+                core.wide_set_draw(!ff || (frames + 1).is_multiple_of(FF_DRAW_EVERY));
+            }
             core.run_frame();
             frames += 1;
+            if wide_on && !wide_fault_told && core.wide_fault() != 0 {
+                // The fault guard caught it (pd_core.c): EXPAND is off for this game, which plays on plain.
+                wide_fault_told = true;
+                eprintln!(
+                    "EXPAND faulted (0x{:08x}) and switched itself off",
+                    core.wide_fault()
+                );
+                shared.notice("EXPAND hit a problem and is off for this game");
+            }
 
             let n = core.read_audio(&mut audio);
             if steady.is_none() {
@@ -525,6 +637,33 @@ impl Job {
                         shadow = sh.map(Shadow::new);
                     }
                 }
+            }
+            // A helper core the fault guard caught (pd_core.c): its feature goes, the game plays on.
+            if let Some(code) = steady.as_ref().and_then(|m| m.dead()) {
+                eprintln!("the music core faulted (0x{code:08x}): fast-forward plays the game's own sound");
+                steady = None;
+                shadow = None;
+                shared.steady_music.store(false, Ordering::Relaxed);
+                shared.notice(
+                    "Fast-forward's music hit a problem: it plays the game's own sound now",
+                );
+                effects.clear();
+            }
+            if let Some(code) = shadow
+                .as_ref()
+                .filter(|s| s.usable)
+                .and_then(|s| s.core.dead())
+            {
+                eprintln!(
+                    "the shadow core faulted (0x{code:08x}): fast-forward plays the music alone"
+                );
+                if let Some(s) = &mut shadow {
+                    s.usable = false;
+                }
+                shared.notice(
+                    "Fast-forward's sound effects hit a problem: the music plays alone now",
+                );
+                effects.clear();
             }
             let sound = shared.ff_sound.load(Ordering::Relaxed);
             let live_song = if steady.is_some() {
@@ -598,9 +737,19 @@ impl Job {
 
             if !ff || frames.is_multiple_of(FF_DRAW_EVERY) {
                 let mut f = shared.frame.lock().unwrap();
-                let px = core.pixels();
-                f.width = core.width() as usize;
-                f.height = core.height() as usize;
+                // EXPAND's window when it drew one, else the game's own frame.
+                let wide = if wide_on {
+                    core.wide_pixels().zip(window)
+                } else {
+                    None
+                };
+                let (px, w, h) = match wide {
+                    Some(((px, w, h), _)) => (px, w, h),
+                    None => (core.pixels(), core.width() as usize, core.height() as usize),
+                };
+                f.window = wide.map(|(_, win)| win);
+                f.width = w;
+                f.height = h;
                 f.rgba.resize(px.len(), 0);
                 for (o, i) in f.rgba.chunks_mut(4).zip(px.chunks(4)) {
                     o[..3].copy_from_slice(&i[..3]);
@@ -674,6 +823,213 @@ mod tests {
     use super::*;
     use adventurepad_sdk::PanelPack;
 
+    /// EXPAND is one game's at a time (pk_wide.c's state is global, and pd_core.c hands it to one core): the
+    /// tests whose games use it take turns.
+    static ONE_GAME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_game() -> std::sync::MutexGuard<'static, ()> {
+        ONE_GAME.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A second core asking for EXPAND while one has it is refused, and gets it once the first lets go.
+    #[test]
+    #[ignore]
+    fn expand_is_one_games_at_a_time() {
+        let _turn = one_game();
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
+            return;
+        };
+        let info = game_info(&rom).unwrap();
+        if !Core::wide_knows(info.crc32) {
+            return;
+        }
+        let mut a = Core::open(&rom, None).unwrap();
+        let mut b = Core::open(&rom, None).unwrap();
+        assert!(a.wide_configure(info.crc32));
+        assert!(
+            !b.wide_configure(info.crc32),
+            "refused while the first has it"
+        );
+        drop(a);
+        assert!(b.wide_configure(info.crc32), "free once the first is gone");
+        assert!(!b.wide_configure(0));
+    }
+
+    /// A fault in EXPAND (caught by the guard) switches it off for this game, and the game plays on, plain.
+    /// `ADVENTUREPAD_TEST_ROM=<a ROM EXPAND knows> cargo test -p adventurepad -- --ignored`.
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn a_fault_in_expand_switches_it_off_and_the_game_goes_on() {
+        let _turn = one_game();
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
+            return;
+        };
+        let info = game_info(&rom).unwrap();
+        if !Core::wide_knows(info.crc32) {
+            return;
+        }
+        let mut core = Core::open(&rom, None).unwrap();
+        assert!(core.wide_configure(info.crc32));
+        core.wide_set_view(-60, 0, 360, 160);
+        for _ in 0..60 {
+            core.run_frame();
+        }
+        assert!(core.wide_pixels().is_some() && core.wide_fault() == 0);
+        core.wide_test_fault();
+        core.run_frame();
+        assert_eq!(core.wide_fault(), 0xC000_0005, "the guard caught it");
+        assert!(
+            core.wide_pixels().is_none(),
+            "EXPAND is off: the plain frame"
+        );
+        let before = core.pixels().to_vec();
+        for _ in 0..120 {
+            core.run_frame();
+        }
+        assert_ne!(core.pixels(), &before[..], "and the game goes on");
+        assert!(core.wide_pixels().is_none(), "EXPAND stays off");
+    }
+
+    /// A panic in the emulator thread ends the game with a message (and the window can go back to the library)
+    /// instead of leaving it waiting on a thread that's gone. `ADVENTUREPAD_TEST_ROM=<rom> ... -- --ignored`.
+    #[test]
+    #[ignore]
+    fn a_panic_in_the_emulator_ends_the_game_cleanly() {
+        let _turn = one_game();
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("adventurepad-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let info = game_info(&rom).unwrap();
+        let save = dir.join("test.sav");
+        let marker = PlayMarker::new(&save, "test", "test-id");
+        let s = Session::start(rom, info, save, marker, Ring::default(), || {});
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!s.shared.ended.load(Ordering::SeqCst));
+        s.test_panic();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(s.shared.ended.load(Ordering::SeqCst), "the game ended");
+        let err = s
+            .shared
+            .error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_default();
+        assert!(
+            err.contains("The game stopped") && err.contains("a test panic"),
+            "{err}"
+        );
+        drop(s); // the thread is gone: stopping it mustn't hang or panic
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// EXPAND only reads the game: two copies from the same start, the same buttons, one drawing EXPAND's window
+    /// every frame (the camera moving it about). Its window is wider than the game, with the game's own frame
+    /// in the middle; and afterwards all of their RAM is identical. `ADVENTUREPAD_TEST_SAVE=<sav>` (copied) gets
+    /// to the overworld, where it draws the map. `ADVENTUREPAD_TEST_ROM=<rom> ... -- --ignored`.
+    #[test]
+    #[ignore]
+    fn expand_draws_wide_and_leaves_the_game_alone() {
+        let _turn = one_game();
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
+            return;
+        };
+        let info = game_info(&rom).unwrap();
+        if !Core::wide_knows(info.crc32) {
+            eprintln!("EXPAND has no tables for this ROM: nothing to check");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("adventurepad-expand-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saves: Vec<Option<PathBuf>> = (0..2)
+            .map(|i| {
+                std::env::var_os("ADVENTUREPAD_TEST_SAVE")
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        let to = dir.join(format!("copy{i}.sav"));
+                        std::fs::copy(s, &to).unwrap();
+                        to
+                    })
+            })
+            .collect();
+        let mut plain = Core::open(&rom, saves[0].as_deref()).unwrap();
+        let mut wide = Core::open(&rom, saves[1].as_deref()).unwrap();
+        assert!(wide.wide_configure(info.crc32));
+        let mut camera = crate::wide::Camera::new();
+        let mut audio = vec![0i16; 8192];
+        let (mut drawn, mut field) = (0usize, 0usize);
+        for f in 0u32..6000 {
+            let keys = match (f / 30) % 8 {
+                _ if f % 30 >= 4 => 0,
+                0 | 4 => mgba_sys::key::A,
+                1 => mgba_sys::key::START,
+                2 => mgba_sys::key::DOWN,
+                3 => mgba_sys::key::LEFT,
+                5 => mgba_sys::key::UP,
+                6 => mgba_sys::key::RIGHT,
+                _ => mgba_sys::key::B,
+            };
+            // The camera on a 1080p view, zooming out now and then, looking about.
+            if f % 900 == 450 {
+                camera.cycle(1920.0, 1080.0);
+            }
+            camera.look_x = if (f / 200) % 3 == 1 { 1.0 } else { 0.0 };
+            camera.walking = keys & 0xF0 != 0;
+            let win = camera
+                .frame(1920.0, 1080.0, wide.wide_scene(), 1.0 / 60.0)
+                .unwrap();
+            wide.wide_set_view(win.x, win.y, win.w, win.h);
+            wide.wide_set_draw(f % 3 != 0); // fast-forward's unshown frames too
+            for c in [&mut plain, &mut wide] {
+                c.set_keys(keys);
+                c.run_frame();
+                c.read_audio(&mut audio);
+            }
+            if wide.wide_scene() == crate::wide::SCENE_FIELD {
+                field += 1;
+            }
+            if let Some((px, w, h)) = wide.wide_pixels() {
+                drawn += 1;
+                assert!(
+                    w > 240 && w as i32 == win.w && h as i32 == win.h,
+                    "{w}x{h} for {win:?}"
+                );
+                // The game's own frame sits where the window says, pixel for pixel (when it covers it all).
+                if win.x <= 0 && win.y <= 0 && win.x + win.w >= 240 && win.y + win.h >= 160 {
+                    let (ox, oy) = ((-win.x) as usize, (-win.y) as usize);
+                    let frame = wide.pixels();
+                    let same = (0..160)
+                        .flat_map(|y| (0..240).map(move |x| (x, y)))
+                        .filter(|&(x, y)| {
+                            px[((oy + y) * w + ox + x) * 4..][..3]
+                                == frame[(y * 240 + x) * 4..][..3]
+                        })
+                        .count();
+                    assert_eq!(same, 240 * 160, "the middle is the game's frame");
+                }
+            }
+        }
+        eprintln!("{drawn} frames drawn wide, {field} of them on the overworld");
+        assert!(drawn > 3000, "EXPAND drew");
+        assert_eq!(wide.wide_fault(), 0);
+        let mut diffs = Vec::new();
+        for (base, len) in [(0x0200_0000u32, 0x4_0000usize), (0x0300_0000, 0x8000)] {
+            let (mut a, mut b) = (vec![0u8; len], vec![0u8; len]);
+            plain.read(base, &mut a);
+            wide.read(base, &mut b);
+            diffs.extend((0..len).filter(|&i| a[i] != b[i]).map(|i| base + i as u32));
+        }
+        assert!(
+            diffs.is_empty(),
+            "EXPAND changed the game at {:08x?}",
+            &diffs[..diffs.len().min(32)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Fast-forward's effects never touch the player's game: two copies from the same start, the same buttons,
     /// one with a shadow core taking snapshots of it and playing its effects muted, every frame, re-syncs
     /// and all. Afterwards all of their RAM is identical, the sound engine's included. A save to boot from:
@@ -681,6 +1037,7 @@ mod tests {
     #[test]
     #[ignore]
     fn the_shadow_leaves_the_game_alone() {
+        let _turn = one_game();
         let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
             return;
         };
@@ -750,6 +1107,7 @@ mod tests {
     #[test]
     #[ignore]
     fn a_real_game_feeds_the_panels() {
+        let _turn = one_game();
         let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
             return;
         };

@@ -5,7 +5,7 @@
 use adventurepad_sdk::style::{self, ACCENT, BAD};
 use adventurepad_sdk::{Action, GameInfo, Memory, Panel, PanelCtx, PanelPack};
 use eframe::egui::{self, RichText};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 /// Every pack, in tab order. A new pack goes here.
@@ -96,7 +96,8 @@ impl PanelHost {
 
     fn visible(&self, i: usize) -> bool {
         let s = &self.slots[i];
-        s.failed.is_some() || catch_unwind(AssertUnwindSafe(|| s.panel.visible())).unwrap_or(true)
+        s.failed.is_some()
+            || crate::crash::caught(AssertUnwindSafe(|| s.panel.visible())).unwrap_or(true)
     }
 
     /// The newest memory copy: refreshes the panels when it's a new one, then opens the panel that wants focus.
@@ -110,7 +111,8 @@ impl PanelHost {
             self.memory = memory;
             let m = self.memory.clone().unwrap();
             for s in self.slots.iter_mut().filter(|s| s.failed.is_none()) {
-                if let Err(e) = catch_unwind(AssertUnwindSafe(|| s.panel.refresh(info, &m))) {
+                if let Err(e) = crate::crash::caught(AssertUnwindSafe(|| s.panel.refresh(info, &m)))
+                {
                     s.failed = Some(panic_text(e));
                 }
             }
@@ -122,7 +124,7 @@ impl PanelHost {
         let wants: Option<usize> = (0..self.slots.len()).find(|&i| {
             let s = &self.slots[i];
             s.failed.is_none()
-                && catch_unwind(AssertUnwindSafe(|| s.panel.wants_focus())).unwrap_or(false)
+                && crate::crash::caught(AssertUnwindSafe(|| s.panel.wants_focus())).unwrap_or(false)
         });
         match (wants, self.focus) {
             (Some(i), None) => {
@@ -158,7 +160,7 @@ impl PanelHost {
                 if !self.visible(i) {
                     continue;
                 }
-                let title = catch_unwind(AssertUnwindSafe(|| self.slots[i].panel.title()))
+                let title = crate::crash::caught(AssertUnwindSafe(|| self.slots[i].panel.title()))
                     .unwrap_or_else(|_| "?".into());
                 if ui
                     .selectable_label(self.tab == Tab::Panel(i), RichText::new(title).strong())
@@ -198,7 +200,7 @@ impl PanelHost {
             return;
         }
         let mut ctx = PanelCtx::new(info, memory.as_deref(), &mut self.actions);
-        let r = catch_unwind(AssertUnwindSafe(|| slot.panel.ui(ui, &mut ctx)));
+        let r = crate::crash::caught(AssertUnwindSafe(|| slot.panel.ui(ui, &mut ctx)));
         if let Err(e) = r {
             slot.failed = Some(panic_text(e));
         }

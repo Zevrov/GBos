@@ -37,6 +37,7 @@ enum Pending {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Controls,
+    Screen,
     FastForward,
     Panels,
     Saves,
@@ -44,8 +45,9 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 5] = [
+    const ALL: [Page; 6] = [
         Page::Controls,
+        Page::Screen,
         Page::FastForward,
         Page::Panels,
         Page::Saves,
@@ -55,6 +57,7 @@ impl Page {
     fn label(self) -> &'static str {
         match self {
             Page::Controls => "CONTROLS",
+            Page::Screen => "SCREEN",
             Page::FastForward => "FAST-FORWARD",
             Page::Panels => "PANELS",
             Page::Saves => "SAVES",
@@ -70,6 +73,8 @@ struct KeyRead {
     ff_held: bool,
     /// Hotkeys pressed this frame (FAST-FORWARD on / off, states, slots).
     pressed: Vec<Control>,
+    /// EXPAND's look-around keys held: -1..1 per axis (right / down positive).
+    look: (f32, f32),
 }
 
 fn read_keys(ctx: &egui::Context, keys: &Keymap) -> KeyRead {
@@ -84,6 +89,14 @@ fn read_keys(ctx: &egui::Context, keys: &Keymap) -> KeyRead {
             match (c.button(), c) {
                 (Some(bit), _) if i.key_down(key) => k.mask |= bit,
                 (None, Control::FastForwardHold) => k.ff_held |= i.key_down(key),
+                (None, Control::LookUp) if i.key_down(key) => k.look.1 -= 1.0,
+                (None, Control::LookDown) if i.key_down(key) => k.look.1 += 1.0,
+                (None, Control::LookLeft) if i.key_down(key) => k.look.0 -= 1.0,
+                (None, Control::LookRight) if i.key_down(key) => k.look.0 += 1.0,
+                (
+                    None,
+                    Control::LookUp | Control::LookDown | Control::LookLeft | Control::LookRight,
+                ) => {}
                 (None, _) if i.key_pressed(key) => k.pressed.push(c),
                 _ => {}
             }
@@ -101,6 +114,8 @@ pub struct AdventurePadApp {
     _audio: Option<Output>,
     screen: Option<TextureHandle>,
     screen_seq: u64,
+    /// Where EXPAND's window goes on the view (None: the plain frame, fitted).
+    screen_window: Option<crate::wide::Window>,
     slot: u8,
     thumbs: Vec<(PathBuf, std::time::SystemTime, TextureHandle)>,
     hud: Option<(String, Instant)>,
@@ -132,6 +147,7 @@ impl AdventurePadApp {
             ring,
             screen: None,
             screen_seq: 0,
+            screen_window: None,
             slot: 0,
             thumbs: Vec::new(),
             hud: None,
@@ -145,6 +161,12 @@ impl AdventurePadApp {
             bind_note: None,
         };
         app.load_labels(&cc.egui_ctx);
+        if let Some(log) = crate::crash::crashed_last_time() {
+            app.error = Some(format!(
+                "Adventure Pad closed unexpectedly last time. What happened is in {}",
+                log.display()
+            ));
+        }
         // A game passed on the command line ("Open with Adventure Pad", a shortcut) starts right away.
         if let Some(rom) = std::env::args_os()
             .nth(1)
@@ -249,7 +271,13 @@ impl AdventurePadApp {
     fn leave(&mut self) {
         if let Some(mut s) = self.session.take() {
             s.stop();
-            if let Some(e) = s.shared.error.lock().unwrap().clone() {
+            if let Some(e) = s
+                .shared
+                .error
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+            {
                 self.error = Some(e);
             }
         }
@@ -277,6 +305,12 @@ impl AdventurePadApp {
         s.shared
             .ff_held
             .store(main.ff_held || extra.ff_held, Ordering::Relaxed);
+        let look = (
+            (main.look.0 + extra.look.0).clamp(-1.0, 1.0),
+            (main.look.1 + extra.look.1).clamp(-1.0, 1.0),
+        );
+        s.shared.look_x.store(look.0.to_bits(), Ordering::Relaxed);
+        s.shared.look_y.store(look.1.to_bits(), Ordering::Relaxed);
         let mut hud = None;
         for k in main.pressed.into_iter().chain(extra.pressed) {
             match k {
@@ -294,6 +328,7 @@ impl AdventurePadApp {
                         .to_owned(),
                     );
                 }
+                Control::Zoom => s.zoom(),
                 Control::SaveState => s.save_state(self.slot),
                 Control::LoadState => s.load_state(self.slot),
                 Control::PrevSlot | Control::NextSlot => {
@@ -545,12 +580,17 @@ impl AdventurePadApp {
             self.leave();
             return;
         }
-        for n in shared.notices.lock().unwrap().drain(..) {
+        for n in shared
+            .notices
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain(..)
+        {
             self.hud = Some((n, Instant::now()));
         }
         // The newest frame onto the screen texture.
         {
-            let f = shared.frame.lock().unwrap();
+            let f = shared.frame.lock().unwrap_or_else(|p| p.into_inner());
             if f.seq != self.screen_seq && f.width > 0 {
                 let img = egui::ColorImage::from_rgba_unmultiplied([f.width, f.height], &f.rgba);
                 match &mut self.screen {
@@ -560,9 +600,14 @@ impl AdventurePadApp {
                     }
                 }
                 self.screen_seq = f.seq;
+                self.screen_window = f.window;
             }
         }
-        let memory = shared.memory.lock().unwrap().clone();
+        let memory = shared
+            .memory
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         if let (Some(host), Some(s)) = (&mut self.host, &self.session) {
             host.feed(&s.info, memory);
         }
@@ -604,7 +649,27 @@ impl AdventurePadApp {
             .frame(egui::Frame::none().fill(Color32::BLACK))
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
-                if let Some(t) = &self.screen {
+                // EXPAND's camera works in screen pixels: the view's size, for its ZOOM steps.
+                let ppp = ctx.pixels_per_point();
+                shared
+                    .view_w
+                    .store((rect.width() * ppp).round() as u32, Ordering::Relaxed);
+                shared
+                    .view_h
+                    .store((rect.height() * ppp).round() as u32, Ordering::Relaxed);
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                if let (Some(t), Some(win)) = (&self.screen, self.screen_window) {
+                    // EXPAND: the window as the camera placed it (whole screen pixels per GBA pixel), clipped to
+                    // the view.
+                    let min = rect.min + egui::vec2(win.off_x, win.off_y) / ppp;
+                    let size = egui::vec2(win.w as f32, win.h as f32) * win.scale / ppp;
+                    ui.painter().with_clip_rect(rect).image(
+                        t.id(),
+                        egui::Rect::from_min_size(min, size),
+                        uv,
+                        Color32::WHITE,
+                    );
+                } else if let Some(t) = &self.screen {
                     let [w, h] = t.size().map(|v| v as f32);
                     let fit = (rect.width() / w).min(rect.height() / h);
                     let scale = if fit >= 1.0 { fit.floor() } else { fit };
@@ -612,9 +677,13 @@ impl AdventurePadApp {
                         rect.center(),
                         egui::vec2(w * scale, h * scale),
                     );
-                    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                     ui.painter().image(t.id(), r, uv, Color32::WHITE);
-                } else if let Some(e) = shared.error.lock().unwrap().as_ref() {
+                } else if let Some(e) = shared
+                    .error
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                {
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -910,6 +979,7 @@ impl AdventurePadApp {
                     Page::FastForward => self.fast_forward_page(ui),
                     Page::Panels => self.panels_page(ui),
                     Page::Saves => self.saves_panel(ui),
+                    Page::Screen => self.screen_page(ui),
                     Page::About => about_page(ui),
                 });
         });
@@ -1023,6 +1093,49 @@ impl AdventurePadApp {
                 &mut self.settings.ff_effects_pitch,
                 false,
                 "Sped up: higher, the way the game makes them at speed",
+            );
+        });
+    }
+
+    fn screen_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("SCREEN").strong().color(MUTED));
+        ui.checkbox(&mut self.settings.expand, RichText::new("EXPAND").strong());
+        ui.label(
+            "The overworld drawn past the GBA's edges, so a wide window shows more of the map with the pixels kept              square. The strips beside the game are rebuilt every frame from the game's own map, tiles and sprites              (it only reads the game, never changes it). Battles, menus and title screens get a glow from the              game's edges instead.",
+        );
+        ui.label(
+            RichText::new(
+                "For FireRed, LeafGreen, Emerald, Ruby and Sapphire in every language and revision, and the ROM                  hacks PokeDaisy's EXPAND knows (Unbound, Radical Red, Lazarus, SoulGold, Emerald Rogue and more).                  Other games show as they are.",
+            )
+            .small()
+            .color(MUTED),
+        );
+        if let Some(s) = &self.session {
+            let on = s.shared.expanding.load(Ordering::Relaxed);
+            ui.label(
+                RichText::new(if on {
+                    "This game: EXPAND is on."
+                } else {
+                    "This game: EXPAND is off."
+                })
+                .small()
+                .color(if on { GOOD } else { MUTED }),
+            );
+        }
+        ui.add_space(10.0);
+        ui.add_enabled_ui(self.settings.expand, |ui| {
+            ui.label(RichText::new("ZOOM").strong());
+            ui.label(format!(
+                "{} steps out to see more of the map; again steps back in. {} / {} / {} / {} look around: the view                  stays where you leave it, and glides back to you when you walk.",
+                self.settings.keys.key_label(Control::Zoom),
+                self.settings.keys.key_label(Control::LookUp),
+                self.settings.keys.key_label(Control::LookLeft),
+                self.settings.keys.key_label(Control::LookDown),
+                self.settings.keys.key_label(Control::LookRight),
+            ));
+            ui.checkbox(
+                &mut self.settings.expand_zoom_on_text,
+                "Zoom back in for text boxes and menus (battles always do)",
             );
         });
     }

@@ -350,6 +350,8 @@ impl SteadyMusic {
     pub fn boot(rom: &Path, rom_bytes: &[u8]) -> Option<SteadyMusic> {
         let songs = M4aSongs::locate(rom_bytes)?;
         let mut core = Core::open(rom, None).ok()?;
+        // A helper core: a fault in it (the fault guard, pd_core.c) only ends fast-forward's music.
+        core.set_guarded(true);
         if core.platform() != mgba_sys::Platform::Gba {
             return None;
         }
@@ -405,6 +407,11 @@ impl SteadyMusic {
         &self.scratch[..n]
     }
 
+    /// The fault that killed this core (the fault guard), if one did: it plays nothing from then on.
+    pub fn dead(&self) -> Option<u32> {
+        self.core.dead()
+    }
+
     /// The song this core plays now.
     #[cfg(test)]
     pub fn playing(&self) -> Option<u32> {
@@ -422,6 +429,26 @@ mod tests {
         assert_eq!(find_pattern(&hay, "00b5..4b", 2), Some(2));
         assert_eq!(find_pattern(&hay, "00b5..4c", 2), None);
         assert_eq!(find_pattern(&hay, "11", 2), None, "only on even offsets");
+    }
+
+    /// A fault inside the music core (caught by the guard) leaves it dead and quiet, never crashing the app.
+    #[test]
+    #[ignore]
+    #[cfg(windows)]
+    fn a_dead_music_core_goes_quiet() {
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let bytes = std::fs::read(&rom).unwrap();
+        let mut steady = SteadyMusic::boot(&rom, &bytes).expect("the music core boots");
+        assert_eq!(steady.dead(), None);
+        steady.core.test_fault();
+        assert_eq!(steady.dead(), Some(0xC000_0005));
+        for _ in 0..30 {
+            steady.follow(Some(0x0800_0000));
+            assert!(steady.run_frame().is_empty(), "a dead core makes no sound");
+        }
     }
 
     /// A real ROM's engine is found and the music core plays the song the live game plays.
