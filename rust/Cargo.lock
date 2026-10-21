@@ -40,6 +40,7 @@ version = "0.1.0"
 dependencies = [
  "adventurepad-sdk",
  "chrono",
+ "companion",
  "cpal",
  "eframe",
  "mgba-sys",

@@ -168,7 +168,8 @@ fn party_row(ui: &mut egui::Ui, m: &Mon) -> egui::Response {
     })
 }
 
-fn summary(ui: &mut egui::Ui, kind: GameKind, m: &Mon) {
+/// A party member's summary: HP, held item, nature, moves, stats with IVs / EVs (PARTY's, and the HUD's).
+pub fn summary(ui: &mut egui::Ui, kind: GameKind, m: &Mon) {
     ui.label(
         RichText::new(format!(
             "{}{}  Lv{}",
@@ -245,13 +246,8 @@ fn summary(ui: &mut egui::Ui, kind: GameKind, m: &Mon) {
             for (name, stat, i) in rows {
                 ui.label(name);
                 ui.label(stat.to_string());
-                ui.label(
-                    RichText::new(m.ivs[i].to_string()).color(if m.ivs[i] >= 30 {
-                        GOOD
-                    } else {
-                        Color32::WHITE
-                    }),
-                );
+                let iv = RichText::new(m.ivs[i].to_string());
+                ui.label(if m.ivs[i] >= 30 { iv.color(GOOD) } else { iv });
                 ui.label(m.evs[i].to_string());
                 ui.end_row();
             }

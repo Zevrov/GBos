@@ -5,7 +5,12 @@ The game runs on the repo's mGBA submodule (compiled in), with an extra screen o
 a window of its own, for a second monitor) and cloud saves through a synced folder.
 
 **Work in progress.** Windows first, **iOS planned** next (not started). What the Android app does and this
-doesn't yet is in [TODO.md](TODO.md) (and [PARITY.md](PARITY.md)); there are no release builds yet, so build it as below.
+doesn't yet is in [TODO.md](TODO.md) (and [PARITY.md](PARITY.md)).
+
+**Download:** the [Adventure Pad releases](https://github.com/Zevrov/GBos/releases) (tags `adventurepad-v*`, not
+the Android app's `v*`): unzip `AdventurePad-<version>-windows-x64.zip` anywhere and run `AdventurePad.exe`. It's
+one exe on Windows 10 or 11 (64-bit), unsigned for now, so SmartScreen may ask first (More info > Run anyway).
+Settings, states and the default saves folder are in `%APPDATA%\AdventurePad`.
 
 **Based on PokeDaisy by Lidor Itzhari - https://github.com/lidor30/pokedaisy**
 
@@ -54,6 +59,12 @@ The app is `rust/target/release/AdventurePad.exe`. Pass a ROM path to open it at
 `cargo run --release -p mgba-sys --example headless -- <rom> <save> [frames]` boots a ROM with no window and
 prints what the companion reads.
 
+**A release:** `python rust/tools/package.py` builds the exe and writes `rust/target/dist/`: the app's zip (the exe
+with this README, LICENSE and NOTICE; it checks the exe needs no DLLs beyond Windows' own), a source zip of just
+what builds it (`rust/`, the mGBA submodule, EXPAND's `pk_wide.c` from `app/src/main/cpp`) and `SHA256SUMS.txt`.
+Tag it `adventurepad-v<version>` (the workspace's version in `rust/Cargo.toml`): `v*` tags are the Android app's
+release workflow.
+
 `ADVENTUREPAD_HOME` moves the app's folder (settings, states, the default saves folder) from
 `%APPDATA%\AdventurePad`; `ADVENTUREPAD_DEBUG=1` prints the frame rate to stderr.
 
@@ -80,9 +91,23 @@ prints what the companion reads.
   with the pixels kept square: the Android app's own `pk_wide.c`, compiled in (FireRed, LeafGreen, Emerald,
   Ruby and Sapphire in every language and revision, and the ROM hacks it has tables for). **ZOOM** steps out
   to see more and eases back in for battles (and, if you like, text boxes and menus); the **look-around** keys
-  move the view, which glides back to you when you walk. It only reads the game: the
+  move the view, which glides back to you when you walk. The **area name** the games slide in at their own
+  top-left corner (towards the middle of a wide view) is drawn at the screen's corner instead, with the map rebuilt
+  where it was (`pd_core.c`: BG0's banner found in VRAM; a setting). It only reads the game: the
   `expand_draws_wide_and_leaves_the_game_alone` test checks the game's RAM comes out identical. A fault in
   `pk_wide.c` switches EXPAND off for the game instead of closing the app (the fault guard, below).
+- **HUD**: your party (levels, HP, status), your Poké Balls and a BAG button over the game while you walk around
+  (`crates/adventurepad/src/hud.rs`, after the Android app's `FieldHud.kt`). Click a Pokémon for its summary, the
+  balls or BAG for a compact bag; the game keeps running under them. Four layouts (CORNERS, CORNERS 2, RAILS beside
+  the game's 3:2, a DOCK bar), three looks (GLASS, WHITE GLASS, WINDOW), three sizes, and each part can be hidden.
+  It steps aside for battles, menus and conversations: EXPAND's scene says what's on screen; without EXPAND it
+  learns the overworld's main callback in its first seconds (battles and menu screens still hide it; text boxes
+  don't). FireRed, LeafGreen and Emerald, as the panels. The minimap, the map with FLY and WILD are still to come.
+  **Battle buttons** (`battle_input.rs`, after the Android app's `BattleButtons.kt` / `BattleInputController.kt`):
+  FIGHT, POKéMON and RUN beside a single battle; FIGHT lists your moves with what each does to the foe, POKéMON
+  your party. A click presses the game's own battle menu for you, button by button (reading its cursor where the
+  game's address is known, so only the presses it needs), as a player would: nothing is written to the game. Your
+  keys pause while a pick steers, never for long. Switching in FireRed 1.1 and Emerald, the rest in LeafGreen too.
 - **PANELS**: the panels in their own window (for a second screen); the developer panels.
 - **SAVES**: the saves folder (the synced folder for cloud saves).
 
@@ -97,6 +122,7 @@ prints what the companion reads.
 | F6 / F8 | Previous / next slot |
 | Q | ZOOM (EXPAND) |
 | I / J / K / L | Look around (EXPAND) |
+| H | HUD on / off |
 | Esc | Leaves SETTINGS |
 
 ## When something goes wrong

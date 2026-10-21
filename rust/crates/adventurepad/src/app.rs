@@ -4,6 +4,7 @@
 use crate::audio::{Output, Ring};
 use crate::controls::{Control, Keymap};
 use crate::emu::{self, Session};
+use crate::hud::{self, Hud, HudLayout, HudLook, HudSize};
 use crate::panels::{self, PanelHost, Tab};
 use crate::saves::{self, CloudFolder, Holder, PlayMarker};
 use crate::settings::{self, Settings};
@@ -18,6 +19,8 @@ use std::time::{Duration, Instant};
 
 const ROM_EXTS: [&str; 3] = ["gba", "gbc", "gb"];
 const PANEL_WIDTH: f32 = 460.0;
+/// Points at the game view's top under its bar of buttons, kept clear (the HUD, EXPAND's area-name banner).
+const TOP_CLEAR: f32 = 44.0;
 
 /// Checks before a game starts: another device has it open, or the sync client left copies.
 enum Pending {
@@ -38,6 +41,7 @@ enum Pending {
 enum Page {
     Controls,
     Screen,
+    Hud,
     FastForward,
     Panels,
     Saves,
@@ -45,9 +49,10 @@ enum Page {
 }
 
 impl Page {
-    const ALL: [Page; 6] = [
+    const ALL: [Page; 7] = [
         Page::Controls,
         Page::Screen,
+        Page::Hud,
         Page::FastForward,
         Page::Panels,
         Page::Saves,
@@ -58,6 +63,7 @@ impl Page {
         match self {
             Page::Controls => "CONTROLS",
             Page::Screen => "SCREEN",
+            Page::Hud => "HUD",
             Page::FastForward => "FAST-FORWARD",
             Page::Panels => "PANELS",
             Page::Saves => "SAVES",
@@ -110,6 +116,8 @@ pub struct AdventurePadApp {
     clouds: Vec<CloudFolder>,
     session: Option<Session>,
     host: Option<PanelHost>,
+    /// The HUD over the game (None: a game the companion can't read).
+    field_hud: Option<Hud>,
     ring: Ring,
     _audio: Option<Output>,
     screen: Option<TextureHandle>,
@@ -143,6 +151,7 @@ impl AdventurePadApp {
             clouds: saves::cloud_folders(),
             session: None,
             host: None,
+            field_hud: None,
             _audio: Output::open(ring.clone()),
             ring,
             screen: None,
@@ -251,6 +260,7 @@ impl AdventurePadApp {
         let marker = self.marker(&save);
         self.ring.clear();
         self.host = Some(PanelHost::new(&info, self.settings.dev_panels));
+        self.field_hud = Hud::for_game(&info);
         let ctx = ctx.clone();
         let wake = move || ctx.request_repaint();
         self.session = Some(Session::start(
@@ -282,6 +292,7 @@ impl AdventurePadApp {
             }
         }
         self.host = None;
+        self.field_hud = None;
         self.ring.clear();
         self.screen = None;
     }
@@ -329,6 +340,18 @@ impl AdventurePadApp {
                     );
                 }
                 Control::Zoom => s.zoom(),
+                Control::Hud => {
+                    self.settings.hud.on = !self.settings.hud.on;
+                    self.settings.save();
+                    hud = Some(
+                        if self.settings.hud.on {
+                            "HUD on"
+                        } else {
+                            "HUD off"
+                        }
+                        .to_owned(),
+                    );
+                }
                 Control::SaveState => s.save_state(self.slot),
                 Control::LoadState => s.load_state(self.slot),
                 Control::PrevSlot | Control::NextSlot => {
@@ -608,6 +631,9 @@ impl AdventurePadApp {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
+        if let (Some(h), Some(m)) = (&mut self.field_hud, &memory) {
+            h.feed(m);
+        }
         if let (Some(host), Some(s)) = (&mut self.host, &self.session) {
             host.feed(&s.info, memory);
         }
@@ -657,12 +683,18 @@ impl AdventurePadApp {
                 shared
                     .view_h
                     .store((rect.height() * ppp).round() as u32, Ordering::Relaxed);
+                shared
+                    .top_clear
+                    .store((TOP_CLEAR * ppp).round() as u32, Ordering::Relaxed);
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                // Where the game's picture is, for the HUD to keep to.
+                let mut picture = rect;
                 if let (Some(t), Some(win)) = (&self.screen, self.screen_window) {
                     // EXPAND: the window as the camera placed it (whole screen pixels per GBA pixel), clipped to
                     // the view.
                     let min = rect.min + egui::vec2(win.off_x, win.off_y) / ppp;
                     let size = egui::vec2(win.w as f32, win.h as f32) * win.scale / ppp;
+                    picture = egui::Rect::from_min_size(min, size).intersect(rect);
                     ui.painter().with_clip_rect(rect).image(
                         t.id(),
                         egui::Rect::from_min_size(min, size),
@@ -677,6 +709,7 @@ impl AdventurePadApp {
                         rect.center(),
                         egui::vec2(w * scale, h * scale),
                     );
+                    picture = r;
                     ui.painter().image(t.id(), r, uv, Color32::WHITE);
                 } else if let Some(e) = shared
                     .error
@@ -691,6 +724,31 @@ impl AdventurePadApp {
                         egui::FontId::proportional(18.0),
                         BAD,
                     );
+                }
+                if let Some(h) = &mut self.field_hud {
+                    let place = hud::Place {
+                        view: rect,
+                        picture,
+                        expanding: self.screen_window.is_some(),
+                        top_clear: TOP_CLEAR,
+                    };
+                    h.ui(
+                        ui,
+                        place,
+                        &self.settings.hud,
+                        shared.field.load(Ordering::Relaxed),
+                    );
+                    let battle = hud::BattleView {
+                        known: shared.battle_known.load(Ordering::Relaxed),
+                        state: shared.battle_state.load(Ordering::Relaxed),
+                        busy: shared.battle_busy.load(Ordering::Relaxed),
+                        can_switch: shared.battle_can_switch.load(Ordering::Relaxed),
+                    };
+                    if let Some(pick) = h.battle_ui(ui, place, &self.settings.hud, battle) {
+                        if let Some(s) = &self.session {
+                            s.battle(pick);
+                        }
+                    }
                 }
                 let bar = egui::Rect::from_min_size(
                     rect.min + egui::vec2(8.0, 8.0),
@@ -980,6 +1038,7 @@ impl AdventurePadApp {
                     Page::Panels => self.panels_page(ui),
                     Page::Saves => self.saves_panel(ui),
                     Page::Screen => self.screen_page(ui),
+                    Page::Hud => self.hud_page(ui),
                     Page::About => about_page(ui),
                 });
         });
@@ -1101,11 +1160,16 @@ impl AdventurePadApp {
         ui.label(RichText::new("SCREEN").strong().color(MUTED));
         ui.checkbox(&mut self.settings.expand, RichText::new("EXPAND").strong());
         ui.label(
-            "The overworld drawn past the GBA's edges, so a wide window shows more of the map with the pixels kept              square. The strips beside the game are rebuilt every frame from the game's own map, tiles and sprites              (it only reads the game, never changes it). Battles, menus and title screens get a glow from the              game's edges instead.",
+            "The overworld drawn past the GBA's edges, so a wide window shows more of the map with the pixels kept \
+             square. The strips beside the game are rebuilt every frame from the game's own map, tiles and sprites \
+             (it only reads the game, never changes it). Battles, menus and title screens get a glow from the \
+             game's edges instead.",
         );
         ui.label(
             RichText::new(
-                "For FireRed, LeafGreen, Emerald, Ruby and Sapphire in every language and revision, and the ROM                  hacks PokeDaisy's EXPAND knows (Unbound, Radical Red, Lazarus, SoulGold, Emerald Rogue and more).                  Other games show as they are.",
+                "For FireRed, LeafGreen, Emerald, Ruby and Sapphire in every language and revision, and the ROM \
+                 hacks PokeDaisy's EXPAND knows (Unbound, Radical Red, Lazarus, SoulGold, Emerald Rogue and more). \
+                 Other games show as they are.",
             )
             .small()
             .color(MUTED),
@@ -1126,7 +1190,8 @@ impl AdventurePadApp {
         ui.add_enabled_ui(self.settings.expand, |ui| {
             ui.label(RichText::new("ZOOM").strong());
             ui.label(format!(
-                "{} steps out to see more of the map; again steps back in. {} / {} / {} / {} look around: the view                  stays where you leave it, and glides back to you when you walk.",
+                "{} steps out to see more of the map; again steps back in. {} / {} / {} / {} look around: the view \
+                 stays where you leave it, and glides back to you when you walk.",
                 self.settings.keys.key_label(Control::Zoom),
                 self.settings.keys.key_label(Control::LookUp),
                 self.settings.keys.key_label(Control::LookLeft),
@@ -1137,7 +1202,99 @@ impl AdventurePadApp {
                 &mut self.settings.expand_zoom_on_text,
                 "Zoom back in for text boxes and menus (battles always do)",
             );
+            ui.checkbox(
+                &mut self.settings.expand_banner_corner,
+                "Area names in the corner of the screen (the game puts them at its own corner, towards the middle)",
+            );
         });
+    }
+
+    fn hud_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("HUD").strong().color(MUTED));
+        ui.checkbox(
+            &mut self.settings.hud.on,
+            RichText::new("HUD over the game").strong(),
+        );
+        ui.label(format!(
+            "Your party, Poké Balls and BAG over the game while you walk around ({} turns it on and off). Click a \
+             Pokémon for its summary, the balls or BAG for your bag; the game keeps running under them, and ESC \
+             closes them. It steps aside for battles, menus and conversations.",
+            self.settings.keys.key_label(Control::Hud)
+        ));
+        ui.label(
+            RichText::new(
+                "For the games the panels read: FireRed, LeafGreen and Emerald. Menus and conversations are told \
+                 apart best with EXPAND on (SCREEN); without it the HUD learns the overworld in its first seconds.",
+            )
+            .small()
+            .color(MUTED),
+        );
+        ui.add_space(10.0);
+        let hud = &mut self.settings.hud;
+        ui.add_enabled_ui(hud.on, |ui| {
+            ui.label(RichText::new("LAYOUT").strong());
+            ui.horizontal(|ui| {
+                for l in HudLayout::ALL {
+                    ui.selectable_value(&mut hud.layout, l, l.label());
+                }
+            });
+            ui.label(
+                RichText::new(match hud.layout {
+                    HudLayout::Corners => "The party bottom left; the balls over BAG bottom right.",
+                    HudLayout::Corners2 => "The party bottom left; BAG over the balls top right.",
+                    HudLayout::Rails => {
+                        "Columns at the sides, beside the game's own 3:2 when there's room (the black bars, or \
+                         EXPAND's margins)."
+                    }
+                    HudLayout::Dock => "One bar along the bottom: the party, the balls, BAG.",
+                })
+                .small()
+                .color(MUTED),
+            );
+            ui.add_space(8.0);
+            ui.label(RichText::new("LOOK").strong());
+            ui.horizontal(|ui| {
+                for l in HudLook::ALL {
+                    ui.selectable_value(&mut hud.look, l, l.label());
+                }
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("SIZE").strong());
+            ui.horizontal(|ui| {
+                for s in HudSize::ALL {
+                    ui.selectable_value(&mut hud.size, s, s.label());
+                }
+            });
+            ui.add_space(8.0);
+            ui.label(RichText::new("SHOW").strong());
+            ui.checkbox(&mut hud.party, "PARTY");
+            ui.checkbox(&mut hud.balls, "POKé BALLS");
+            ui.checkbox(&mut hud.bag, "BAG");
+            ui.add_space(8.0);
+            ui.label(RichText::new("BATTLE BUTTONS").strong());
+            ui.checkbox(
+                &mut hud.battle_buttons,
+                "FIGHT, POKéMON and RUN beside a battle, clickable: a move or a Pokémon from their lists",
+            );
+            ui.add_enabled_ui(hud.battle_buttons, |ui| {
+                ui.checkbox(&mut hud.battle_hints, "Hints on the moves: SUPER, RESISTED, IMMUNE against the foe");
+            });
+            ui.label(
+                RichText::new(
+                    "They press the game's own battle menu for you, button by button, as you would (your keys pause \
+                     while they do). Single battles in FireRed, LeafGreen and Emerald; switching in FireRed 1.1 and \
+                     Emerald.",
+                )
+                .small()
+                .color(MUTED),
+            );
+        });
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("Still to come from the Android app: the minimap, the map with FLY, and WILD POKéMON.")
+                .small()
+                .color(MUTED),
+        );
     }
 
     fn panels_page(&mut self, ui: &mut egui::Ui) {
@@ -1204,7 +1361,8 @@ fn about_page(ui: &mut egui::Ui) {
     );
     ui.add_space(8.0);
     ui.label(
-        "Free software under the GNU General Public License v3, with PokeDaisy's additional term: the line above          stays in the documentation and the credits of anything built from it. The source comes with the app.",
+        "Free software under the GNU General Public License v3, with PokeDaisy's additional term: the line above \
+         stays in the documentation and the credits of anything built from it. The source comes with the app.",
     );
     ui.add_space(12.0);
     ui.label(RichText::new("BUILT WITH").strong().color(MUTED));
@@ -1219,7 +1377,10 @@ fn about_page(ui: &mut egui::Ui) {
     ui.add_space(12.0);
     ui.label(
         RichText::new(
-            "A fan project, not affiliated with or endorsed by Nintendo, Game Freak, Creatures or The Pokémon              Company. Pokémon and all related names are trademarks of their owners; Game Boy, Game Boy Color and              Game Boy Advance are trademarks of Nintendo. No games, BIOS or game art are included: use your own              legally dumped ROMs.",
+            "A fan project, not affiliated with or endorsed by Nintendo, Game Freak, Creatures or The Pokémon \
+             Company. Pokémon and all related names are trademarks of their owners; Game Boy, Game Boy Color and \
+             Game Boy Advance are trademarks of Nintendo. No games, BIOS or game art are included: use your own \
+             legally dumped ROMs.",
         )
         .small()
         .color(MUTED),

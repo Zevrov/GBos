@@ -38,8 +38,12 @@ pub struct Settings {
     pub expand: bool,
     /// ZOOM pulls back in for text boxes and menus too (battles always do).
     pub expand_zoom_on_text: bool,
+    /// EXPAND draws the area-name banner in the view's top-left corner, not the game frame's (towards the middle).
+    pub expand_banner_corner: bool,
     /// The keyboard controls (SETTINGS > CONTROLS).
     pub keys: crate::controls::Keymap,
+    /// SETTINGS > HUD: the party, balls and BAG over the game.
+    pub hud: crate::hud::HudStyle,
 }
 
 impl Default for Settings {
@@ -55,7 +59,9 @@ impl Default for Settings {
             ff_effects_pitch: true,
             expand: true,
             expand_zoom_on_text: true,
+            expand_banner_corner: true,
             keys: Default::default(),
+            hud: Default::default(),
         }
     }
 }

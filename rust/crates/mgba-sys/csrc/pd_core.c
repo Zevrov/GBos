@@ -25,6 +25,10 @@
 
 #define PD_AUDIO_SCRATCH 8192   /* per channel */
 
+/* The area-name banner's corner of the frame: pk_wide.c's POPUP_ROWS x POPUP_COLS tiles. */
+#define BANNER_W (14 * 8)
+#define BANNER_H (5 * 8)
+
 struct PdCore {
     struct mCore* core;
     color_t* video;
@@ -43,6 +47,13 @@ struct PdCore {
     bool wideSkipped;          /* the last frame was only noted: wide / wideW still hold the one before */
     unsigned long wideFault;   /* the fault that switched EXPAND off (pd_guard), 0 = none */
     bool wideTestFault;        /* tests: EXPAND's next frame faults */
+    /* The area-name banner the games slide in at the frame's top-left: moved to (bannerX, bannerY) of the window
+     * (its pixels; -1 = left where the game puts it), with the map pk_wide.c rebuilds under the frame (`centre`)
+     * where it was. */
+    int bannerX, bannerY;
+    uint32_t* centre;
+    uint8_t bannerMask[BANNER_H][BANNER_W];   /* the banner's pixels on the last frame (bannerFind) */
+    bool bannerMoved;                          /* the last frame's banner was moved */
     /* A helper core (fast-forward's music and shadow cores) runs under pd_guard: a fault in it leaves the core
      * dead - every call a no-op from then on, never torn down (its state is whatever the fault left) - and the
      * player's game goes on. */
@@ -160,6 +171,7 @@ PdCore* pd_core_open(const char* romPath, const char* savePath) {
 
     PdCore* c = calloc(1, sizeof(PdCore));
     if (!c) { rom->close(rom); core->deinit(core); return NULL; }
+    c->bannerX = c->bannerY = -1;
     core->desiredVideoDimensions(core, &c->vw, &c->vh);
     c->video = calloc((size_t) c->vw * c->vh, sizeof(color_t));
     core->setVideoBuffer(core, c->video, c->vw);
@@ -205,6 +217,7 @@ void pd_core_close(PdCore* c) {
     if (c->core) c->core->deinit(c->core);
     else if (c->saveVf) c->saveVf->close(c->saveVf);
     free(c->wide);
+    free(c->centre);
     free(c->video);
     free(c);
 }
@@ -242,6 +255,7 @@ struct WideJob {
     PdCore* c;
     struct PkWideView v;
     bool skip;
+    uint32_t* centre;   /* the map under the frame too (pk_wide_view's `centre`), or NULL */
 };
 
 static void selftestFault(void* arg);
@@ -253,10 +267,108 @@ static void wideJob(void* arg) {
         selftestFault(NULL);
     }
     if (j->skip) pk_wide_skip(j->c->core, (const uint32_t*) j->c->video);
-    else pk_wide_view(j->c->core, (const uint32_t*) j->c->video, j->c->wide, j->v, NULL);
+    else pk_wide_view(j->c->core, (const uint32_t*) j->c->video, j->c->wide, j->v, j->centre);
 }
 
 static void runFrameInner(PdCore* c);
+
+/* The area-name banner's corner of the frame (pk_wide.c's POPUP_ROWS x POPUP_COLS tiles of BG0), and how many of
+ * its pixels must show for it to be up. */
+#define BANNER_MIN 64
+
+/* mGBA's 32-bit colour for a BGR555 one (mColorFrom555, pk_wide.c's color()): its top 5 bits per channel. */
+static inline uint32_t rgb555(uint16_t c) {
+    return (uint32_t) (c & 0x1F) << 3 | (uint32_t) ((c >> 5) & 0x1F) << 11 | (uint32_t) ((c >> 10) & 0x1F) << 19;
+}
+
+/* BG0's palette index at the frame's (x, y) with vertical scroll `vofs`, as the PPU reads its tilemap and tiles
+ * (a 16-colour 256 x 256 text background, as the banner's is); 0 = transparent. Its colour in *col. */
+static int bg0At(const uint8_t* vram, const uint16_t* pal, uint32_t chr, uint32_t scr, int hofs, int vofs, int x,
+                 int y, uint32_t* col) {
+    int px = (x + hofs) & 255, py = (y + vofs) & 255;
+    uint32_t e = (uint32_t) (vram[scr + 2 * ((py >> 3) * 32 + (px >> 3))] | vram[scr + 2 * ((py >> 3) * 32 + (px >> 3)) + 1] << 8);
+    int ix = px & 7, iy = py & 7;
+    if (e & 0x400) ix = 7 - ix;
+    if (e & 0x800) iy = 7 - iy;
+    uint32_t at = chr + (e & 0x3FF) * 32 + (uint32_t) iy * 4 + (uint32_t) (ix >> 1);
+    if (at >= 0x10000) return 0;
+    int idx = ix & 1 ? vram[at] >> 4 : vram[at] & 15;
+    if (idx) *col = rgb555(pal[(e >> 12) * 16 + idx]);
+    return idx;
+}
+
+/* The banner's pixels on the frame just drawn, into c->bannerMask: where BG0 is solid in the top-left corner and the
+ * frame shows its colour. That colour check also finds the scroll it was drawn with: it slides in by BG0's vertical
+ * scroll, and the registers after the frame may be the next one's already. (mGBA's layer tags on the pixels would
+ * say it, but blending - the overworld's - strips them.) Returns how many pixels. */
+static int bannerFind(PdCore* c) {
+    struct GBA* gba = (struct GBA*) c->core->board;
+    const uint16_t* io = gba->memory.io;
+    uint16_t cnt = io[0x08 >> 1];
+    if (!(io[0] & 0x100) || (cnt & 0x80) || (cnt >> 14)) return 0;   /* BG0 off, 256 colours, not 256 x 256 */
+    const uint8_t* vram = (const uint8_t*) gba->video.vram;
+    const uint16_t* pal = gba->video.palette;
+    uint32_t chr = ((cnt >> 2) & 3) * 0x4000u, scr = ((cnt >> 8) & 31) * 0x800u;
+    int hofs = io[0x10 >> 1] & 0x1FF, vofs = io[0x12 >> 1] & 0x1FF;
+    const uint32_t* f = (const uint32_t*) c->video;
+    uint32_t col;
+    /* Nothing solid there, at this scroll or a step either way: no banner (the usual case, so it stays cheap). */
+    int solid = 0;
+    for (int y = 0; y < BANNER_H && solid < BANNER_MIN; y += 2)
+        for (int x = 0; x < BANNER_W; x += 2) solid += bg0At(vram, pal, chr, scr, hofs, vofs, x, y, &col) != 0;
+    if (solid * 4 < BANNER_MIN / 2) return 0;
+    int best = 0, bestDy = 0;
+    for (int dy = -12; dy <= 12; dy++) {
+        int n = 0, bad = 0;
+        for (int y = 0; y < BANNER_H; y++)
+            for (int x = 0; x < BANNER_W; x++)
+                if (bg0At(vram, pal, chr, scr, hofs, vofs + dy, x, y, &col)) {
+                    if (((f[y * PK_WIDE_W + x] ^ col) & 0xF8F8F8) == 0) n++;
+                    else bad++;
+                }
+        if (n > best && bad * 8 < n) {
+            best = n;
+            bestDy = dy;
+        }
+    }
+    if (best < BANNER_MIN) return 0;
+    /* The banner fits the corner; a window that reaches past it (a menu's box, Seaglass's clock) isn't one. */
+    int past = 0;
+    for (int y = 0; y < BANNER_H + 16; y++)
+        for (int x = 0; x < BANNER_W + 32; x++)
+            if ((x >= BANNER_W || y >= BANNER_H) && bg0At(vram, pal, chr, scr, hofs, vofs + bestDy, x, y, &col) &&
+                ((f[y * PK_WIDE_W + x] ^ col) & 0xF8F8F8) == 0)
+                past++;
+    if (past >= 16) return 0;
+    for (int y = 0; y < BANNER_H; y++)
+        for (int x = 0; x < BANNER_W; x++)
+            c->bannerMask[y][x] = bg0At(vram, pal, chr, scr, hofs, vofs + bestDy, x, y, &col) &&
+                ((f[y * PK_WIDE_W + x] ^ col) & 0xF8F8F8) == 0;
+    return best;
+}
+
+/* After pk_wide_view drew the window with `centre`: the banner's pixels go where the window's top-left is
+ * (bannerX, bannerY, keeping their place in the corner, so it still slides in), and the map under them shows
+ * where the frame had them. Only on the overworld (a map was rebuilt, so `centre` holds it). */
+static bool moveBanner(PdCore* c, struct PkWideView v) {
+    int scene = pk_wide_scene();
+    if (scene != PK_WIDE_SCENE_FIELD && scene != PK_WIDE_SCENE_TEXT) return false;
+    const uint32_t* f = (const uint32_t*) c->video;
+    uint32_t* out = c->wide;
+    for (int y = 0; y < BANNER_H; y++)
+        for (int x = 0; x < BANNER_W; x++) {
+            int i = x - v.x, j = y - v.y;
+            if (c->bannerMask[y][x] && i >= 0 && i < v.w && j >= 0 && j < v.h)
+                out[j * v.w + i] = c->centre[y * PK_WIDE_W + x];
+        }
+    for (int y = 0; y < BANNER_H; y++)
+        for (int x = 0; x < BANNER_W; x++) {
+            uint32_t p = f[y * PK_WIDE_W + x];
+            int i = c->bannerX + x, j = c->bannerY + y;
+            if (c->bannerMask[y][x] && i >= 0 && i < v.w && j >= 0 && j < v.h) out[j * v.w + i] = p;
+        }
+    return true;
+}
 
 static void runFrameJob(void* arg) {
     runFrameInner(arg);
@@ -280,10 +392,15 @@ static void runFrameInner(PdCore* c) {
     bool on = c->wide && c->wideCrc && v.w > 0 && v.h > 0 && v.w <= PK_WIDE_MAX_VIEW_W && v.h <= PK_WIDE_MAX_VIEW_H &&
         sizeof(color_t) == 4 && c->vw == PK_WIDE_W && c->vh == PK_WIDE_H;
     c->wideSkipped = false;
+    c->bannerMoved = false;
     if (on) {
         /* A fault in pk_wide.c (a bad table, a game state it didn't expect) switches EXPAND off for this game and
          * the frame goes on plain - instead of taking the app down. */
-        struct WideJob job = { c, v, c->wideSkipNext };
+        /* The banner moves only when the window reaches past the frame's top or left (else it's at the corner
+         * already), and the map under it is drawn only while it's up. */
+        bool banner = !c->wideSkipNext && c->bannerX >= 0 && (v.x < 0 || v.y < 0) && bannerFind(c) > 0;
+        if (banner && !c->centre) c->centre = calloc((size_t) PK_WIDE_W * PK_WIDE_H, sizeof(uint32_t));
+        struct WideJob job = { c, v, c->wideSkipNext, banner ? c->centre : NULL };
         unsigned long f = pd_guard(wideJob, &job);
         if (f || pk_wide_fault()) {
             c->wideFault = f ? f : (unsigned long) pk_wide_fault();
@@ -296,6 +413,7 @@ static void runFrameInner(PdCore* c) {
         } else {
             c->wideW = v.w;
             c->wideH = v.h;
+            if (job.centre) c->bannerMoved = moveBanner(c, v);
         }
     } else {
         c->wideW = c->wideH = 0;
@@ -332,6 +450,16 @@ void pd_core_wide_set_view(PdCore* c, int x, int y, int w, int h) {
 }
 
 void pd_core_wide_set_draw(PdCore* c, bool draw) { if (c) c->wideSkipNext = !draw; }
+
+const uint8_t* pd_core_wide_banner(const PdCore* c) {
+    return c && c->bannerMoved ? &c->bannerMask[0][0] : NULL;
+}
+
+void pd_core_wide_set_banner(PdCore* c, int x, int y) {
+    if (!c) return;
+    c->bannerX = x < 0 || y < 0 ? -1 : x;
+    c->bannerY = x < 0 || y < 0 ? -1 : y;
+}
 
 const uint8_t* pd_core_wide_pixels(const PdCore* c, int* w, int* h) {
     if (!c || !c->wide || c->wideW <= 0 || c->wideSkipped) { *w = *h = 0; return NULL; }

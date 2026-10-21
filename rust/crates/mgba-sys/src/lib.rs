@@ -35,6 +35,8 @@ extern "C" {
     fn pd_core_wide_configure(c: *mut PdCore, crc: u32) -> bool;
     fn pd_core_wide_set_view(c: *mut PdCore, x: c_int, y: c_int, w: c_int, h: c_int);
     fn pd_core_wide_set_draw(c: *mut PdCore, draw: bool);
+    fn pd_core_wide_set_banner(c: *mut PdCore, x: c_int, y: c_int);
+    fn pd_core_wide_banner(c: *const PdCore) -> *const u8;
     fn pd_core_wide_pixels(c: *const PdCore, w: *mut c_int, h: *mut c_int) -> *const u8;
     fn pd_core_wide_scene(c: *const PdCore) -> c_int;
     fn pd_core_wide_fault(c: *const PdCore) -> std::os::raw::c_ulong;
@@ -104,6 +106,10 @@ fn c_path(p: &Path) -> Option<CString> {
 }
 
 /// One loaded game. Not thread-safe by itself: the app keeps it on its emulator thread (it is [`Send`]).
+/// The area-name banner's corner of the frame (pd_core.c's BANNER_W x BANNER_H).
+pub const BANNER_W: usize = 112;
+pub const BANNER_H: usize = 40;
+
 pub struct Core {
     raw: *mut PdCore,
 }
@@ -247,6 +253,20 @@ impl Core {
     /// frame 240 x 160); w 0 = none (the plain frame).
     pub fn wide_set_view(&mut self, x: i32, y: i32, w: i32, h: i32) {
         unsafe { pd_core_wide_set_view(self.raw, x, y, w, h) }
+    }
+
+    /// Where the area-name banner goes in EXPAND's window (its pixels), instead of the game frame's top-left
+    /// corner; None leaves it there.
+    pub fn wide_set_banner(&mut self, at: Option<(i32, i32)>) {
+        let (x, y) = at.unwrap_or((-1, -1));
+        unsafe { pd_core_wide_set_banner(self.raw, x, y) }
+    }
+
+    /// The banner pixels the last frame moved (BANNER_W x BANNER_H of the frame's top-left, 1 = moved), if it
+    /// moved any.
+    pub fn wide_banner(&self) -> Option<&[u8]> {
+        let p = unsafe { pd_core_wide_banner(self.raw) };
+        (!p.is_null()).then(|| unsafe { std::slice::from_raw_parts(p, BANNER_W * BANNER_H) })
     }
 
     /// Whether the next frame is shown: false only keeps EXPAND's tracking up (fast-forward's unseen frames).
