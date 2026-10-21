@@ -7,7 +7,7 @@ use crate::saves::{self, PlayMarker};
 use adventurepad_sdk::{GameInfo, Memory, Platform, Region};
 use mgba_sys::Core;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -55,8 +55,20 @@ pub struct Shared {
     /// SETTINGS > SCREEN: EXPAND on, and ZOOM's close-ups for text boxes and menus.
     pub expand: AtomicBool,
     pub zoom_on_text: AtomicBool,
+    /// SETTINGS > SCREEN: the area-name banner in the view's top-left corner, not the game frame's.
+    pub banner_corner: AtomicBool,
+    /// Screen pixels at the view's top that the bar of buttons covers (the UI sets it): the banner goes under it.
+    pub top_clear: AtomicU32,
     /// EXPAND has tables for this game and draws it (set by the thread).
     pub expanding: AtomicBool,
+    /// The HUD's cue (crate::hud::FIELD_*): the overworld, settled, as EXPAND's scene says; unknown without EXPAND.
+    pub field: AtomicU8,
+    /// The battle buttons (battle_input.rs): this game has them; the battle's menu (battle_input::NONE...); a pick
+    /// on its way; whether a switch can be driven here.
+    pub battle_known: AtomicBool,
+    pub battle_state: AtomicU8,
+    pub battle_busy: AtomicBool,
+    pub battle_can_switch: AtomicBool,
     /// The game view's size in screen pixels (the UI sets it each frame), for ZOOM's steps.
     pub view_w: AtomicU32,
     pub view_h: AtomicU32,
@@ -85,6 +97,8 @@ enum Cmd {
     Reset,
     /// ZOOM: the next step out (back to 1x after the last).
     Zoom,
+    /// A battle button: pressed into the game's battle menu (battle_input.rs).
+    Battle(crate::battle_input::Pick),
     /// Tests: a panic in the emulator thread.
     #[cfg(test)]
     TestPanic,
@@ -137,6 +151,7 @@ impl Session {
                 rom_bytes: info.rom.clone(),
                 platform: info.platform,
                 crc: info.crc32,
+                battle: crate::battle_input::Addrs::for_game(&info.code, info.revision),
                 save,
                 states_dir: states_dir.clone(),
                 shared: shared.clone(),
@@ -153,7 +168,8 @@ impl Session {
                     if let Err(e) = crate::crash::caught(std::panic::AssertUnwindSafe(|| job.run(rx))) {
                         let msg = crate::crash::message(e.as_ref());
                         *on_panic.error.lock().unwrap_or_else(|p| p.into_inner()) = Some(format!(
-                            "The game stopped because of a problem ({msg}). Your in-game saves are safe; the                              details are in crash.log in the app's folder."
+                            "The game stopped because of a problem ({msg}). Your in-game saves are safe; the \
+                             details are in crash.log in the app's folder."
                         ));
                         on_panic.ended.store(true, Ordering::SeqCst);
                     }
@@ -195,6 +211,10 @@ impl Session {
         let _ = self.tx.send(Cmd::Zoom);
     }
 
+    pub fn battle(&self, pick: crate::battle_input::Pick) {
+        let _ = self.tx.send(Cmd::Battle(pick));
+    }
+
     /// The settings the running game follows: fast-forward's speed and sound.
     pub fn apply(&self, settings: &crate::settings::Settings) {
         self.shared
@@ -210,6 +230,9 @@ impl Session {
         self.shared
             .zoom_on_text
             .store(settings.expand_zoom_on_text, Ordering::Relaxed);
+        self.shared
+            .banner_corner
+            .store(settings.expand_banner_corner, Ordering::Relaxed);
     }
 
     /// Stops the game where it is (SETTINGS open), or lets it go on.
@@ -393,6 +416,8 @@ struct Job {
     rom_bytes: Arc<[u8]>,
     platform: Platform,
     crc: u32,
+    /// Where the battle buttons read the game, if it's one they know.
+    battle: Option<crate::battle_input::Addrs>,
     save: PathBuf,
     states_dir: PathBuf,
     shared: Arc<Shared>,
@@ -408,6 +433,7 @@ impl Job {
             rom_bytes,
             platform,
             crc,
+            battle: battle_addrs,
             save,
             states_dir,
             shared,
@@ -454,8 +480,18 @@ impl Job {
         let mut camera_at = Instant::now();
         let mut window: Option<crate::wide::Window> = None;
         let mut wide_fault_told = false;
+        // Frames of overworld in a row (EXPAND's scene), for the HUD.
+        let mut field_frames = 0u32;
         let mut effects: Vec<i16> = Vec::new();
         let mut wsola = crate::wsola::Wsola::default();
+        // The battle buttons' presses (battle_input.rs).
+        let mut battle = battle_addrs.map(crate::battle_input::BattleDriver::new);
+        if let Some(b) = &battle {
+            shared.battle_known.store(true, Ordering::Relaxed);
+            shared
+                .battle_can_switch
+                .store(b.addrs().can_switch(), Ordering::Relaxed);
+        }
 
         // Resume, unless the save changed since the state was made (another device wrote it: the save wins).
         let resume = states_dir.join("resume");
@@ -520,6 +556,11 @@ impl Job {
                 }
                 #[cfg(test)]
                 Ok(Cmd::TestPanic) => panic!("a test panic in the emulator thread"),
+                Ok(Cmd::Battle(pick)) => {
+                    if let Some(b) = &mut battle {
+                        b.pick(pick);
+                    }
+                }
                 Ok(Cmd::Zoom) => {
                     if wide_on {
                         let (vw, vh) = (
@@ -571,6 +612,13 @@ impl Job {
                 keys |= pressed;
                 press_left -= 1;
             }
+            // A battle button's presses: in place of the player's while a pick steers.
+            if let Some(b) = &mut battle {
+                let (bits, exclusive) = b.tick(&mut core);
+                keys = if exclusive { bits } else { keys | bits };
+                shared.battle_state.store(b.state(), Ordering::Relaxed);
+                shared.battle_busy.store(b.busy(), Ordering::Relaxed);
+            }
             core.set_keys(keys);
             // Fast-forward's effects: the shadow runs this frame from where the game is, with the same
             // buttons, its music muted. The game itself is only read (a snapshot when the shadow re-syncs).
@@ -614,10 +662,31 @@ impl Job {
                     Some(w) => core.wide_set_view(w.x, w.y, w.w, w.h),
                     None => core.wide_set_view(0, 0, 0, 0),
                 }
+                let banner = window
+                    .filter(|_| shared.banner_corner.load(Ordering::Relaxed))
+                    .map(|w| w.banner_at(shared.top_clear.load(Ordering::Relaxed) as f32));
+                core.wide_set_banner(banner);
                 core.wide_set_draw(!ff || (frames + 1).is_multiple_of(FF_DRAW_EVERY));
             }
             core.run_frame();
             frames += 1;
+            // The HUD shows on the overworld once it has settled (hud.rs); EXPAND's scene says what's on screen.
+            let field = if wide_on && window.is_some() {
+                field_frames = if core.wide_scene() == crate::wide::SCENE_FIELD {
+                    field_frames.saturating_add(1)
+                } else {
+                    0
+                };
+                if field_frames >= crate::hud::FIELD_SETTLE_FRAMES {
+                    crate::hud::FIELD_YES
+                } else {
+                    crate::hud::FIELD_NO
+                }
+            } else {
+                field_frames = 0;
+                crate::hud::FIELD_UNKNOWN
+            };
+            shared.field.store(field, Ordering::Relaxed);
             if wide_on && !wide_fault_told && core.wide_fault() != 0 {
                 // The fault guard caught it (pd_core.c): EXPAND is off for this game, which plays on plain.
                 wide_fault_told = true;
@@ -735,7 +804,9 @@ impl Job {
             }
             was_ff = ff;
 
-            if !ff || frames.is_multiple_of(FF_DRAW_EVERY) {
+            // A battle button's switch keeps the battle's last frame up while it drives the game's party menu.
+            let hold = battle.as_ref().is_some_and(|b| b.hold_frame());
+            if !hold && (!ff || frames.is_multiple_of(FF_DRAW_EVERY)) {
                 let mut f = shared.frame.lock().unwrap();
                 // EXPAND's window when it drew one, else the game's own frame.
                 let wide = if wide_on {
@@ -1026,6 +1097,235 @@ mod tests {
             diffs.is_empty(),
             "EXPAND changed the game at {:08x?}",
             &diffs[..diffs.len().min(32)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// EXPAND moves the area-name banner from the game frame's corner (towards the middle of a wide view) to the
+    /// window's: a game played about from a save or state on the overworld; whenever the banner is up on the frame,
+    /// none of its pixels are left where the frame has it and all of them are at the corner. The game is only read.
+    /// `ADVENTUREPAD_TEST_SHOTS=<dir>` saves a frame of it. `ADVENTUREPAD_TEST_ROM=<rom>`, `_SAVE` / `_STATE`
+    /// (copied) `... -- --ignored`.
+    #[test]
+    #[ignore]
+    fn expand_moves_the_area_banner_to_the_corner() {
+        let _turn = one_game();
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
+            return;
+        };
+        let info = game_info(&rom).unwrap();
+        if !Core::wide_knows(info.crc32) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("adventurepad-banner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = |var: &str, name: &str| {
+            std::env::var_os(var).filter(|s| !s.is_empty()).map(|s| {
+                let to = dir.join(name);
+                std::fs::copy(s, &to).unwrap();
+                to
+            })
+        };
+        let save = copy("ADVENTUREPAD_TEST_SAVE", "copy.sav");
+        let mut core = Core::open(&rom, save.as_deref()).unwrap();
+        if let Some(state) = copy("ADVENTUREPAD_TEST_STATE", "copy.state") {
+            assert!(core.load_state(&state));
+        }
+        assert!(core.wide_configure(info.crc32));
+        let shots = std::env::var_os("ADVENTUREPAD_TEST_SHOTS").map(PathBuf::from);
+        let mut camera = crate::wide::Camera::new();
+        let mut audio = vec![0i16; 8192];
+        let (mut up, mut shot) = (0, false);
+        for f in 0u32..12000 {
+            // Through the title (Continue), then walking about: new areas bring the banner.
+            let keys = match (f / 20) % 12 {
+                _ if f < 1500 => {
+                    [0, mgba_sys::key::A, 0, mgba_sys::key::START][(f / 20 % 4) as usize]
+                }
+                // A now and then: through a battle the state may start in, and text boxes.
+                0..=2 => mgba_sys::key::DOWN,
+                3..=5 => mgba_sys::key::LEFT,
+                6 | 11 => mgba_sys::key::A,
+                7 => mgba_sys::key::B,
+                _ => mgba_sys::key::UP,
+            };
+            let win = camera
+                .frame(1920.0, 1080.0, core.wide_scene(), 1.0 / 60.0)
+                .unwrap();
+            core.wide_set_view(win.x, win.y, win.w, win.h);
+            let (bx, by) = win.banner_at(44.0);
+            core.wide_set_banner(Some((bx, by)));
+            core.set_keys(keys);
+            core.run_frame();
+            core.read_audio(&mut audio);
+            let scene = core.wide_scene();
+            if scene != crate::wide::SCENE_FIELD && scene != crate::wide::SCENE_TEXT {
+                continue;
+            }
+            let frame = core.pixels();
+            let Some(mask) = core.wide_banner() else {
+                continue;
+            };
+            let banner: Vec<(usize, usize)> = (0..mgba_sys::BANNER_H)
+                .flat_map(|y| (0..mgba_sys::BANNER_W).map(move |x| (x, y)))
+                .filter(|&(x, y)| mask[y * mgba_sys::BANNER_W + x] != 0)
+                .collect();
+            assert!(banner.len() >= 64, "a banner is most of a window");
+            let Some((px, w, h)) = core.wide_pixels() else {
+                continue;
+            };
+            up += 1;
+            let at = |i: i32, j: i32| -> Option<&[u8]> {
+                (i >= 0 && j >= 0 && (i as usize) < w && (j as usize) < h)
+                    .then(|| &px[(j as usize * w + i as usize) * 4..][..3])
+            };
+            for &(x, y) in &banner {
+                let p = &frame[(y * 240 + x) * 4..][..3];
+                if let Some(o) = at(bx + x as i32, by + y as i32) {
+                    assert_eq!(o, p, "the banner's pixel ({x}, {y}) at the corner");
+                }
+            }
+            // Where the frame has it, the map now (skipping any the corner copy lands on).
+            let left = banner
+                .iter()
+                .filter(|&&(x, y)| {
+                    let (i, j) = (x as i32 - win.x, y as i32 - win.y);
+                    let moved_here = (0..112).contains(&(i - bx)) && (0..40).contains(&(j - by));
+                    !moved_here && at(i, j) == Some(&frame[(y * 240 + x) * 4..][..3])
+                })
+                .count();
+            assert!(
+                left * 10 < banner.len(),
+                "{left} of {} banner pixels left on the frame",
+                banner.len()
+            );
+            if let (Some(dir), false) = (&shots, shot) {
+                if up >= 30 {
+                    shot = true;
+                    let mut rgba = px[..w * h * 4].to_vec();
+                    rgba.chunks_mut(4).for_each(|p| p[3] = 255);
+                    let file = std::fs::File::create(dir.join("banner.png")).unwrap();
+                    let mut enc =
+                        png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+                    enc.set_color(png::ColorType::Rgba);
+                    enc.set_depth(png::BitDepth::Eight);
+                    enc.write_header().unwrap().write_image_data(&rgba).unwrap();
+                }
+            }
+        }
+        eprintln!("the banner was up on {up} frames, moved each time");
+        assert_eq!(core.wide_fault(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The HUD shows on the overworld and steps aside for menus, text and battles: a game played about with
+    /// EXPAND's camera on, the HUD fed the panels' memory copies, its cue worked out as the emulator thread does.
+    /// Without EXPAND (the callback it learns) it mostly agrees, and never shows in a battle. A save that gets to
+    /// the overworld: `ADVENTUREPAD_TEST_SAVE=<sav>`, or a state there: `ADVENTUREPAD_TEST_STATE=<state>` (both
+    /// copied). `ADVENTUREPAD_TEST_ROM=<rom> ... -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_hud_shows_on_the_overworld_only() {
+        let _turn = one_game();
+        let Some(rom) = std::env::var_os("ADVENTUREPAD_TEST_ROM").map(PathBuf::from) else {
+            return;
+        };
+        let info = game_info(&rom).unwrap();
+        let Some(mut hud) = crate::hud::Hud::for_game(&info) else {
+            eprintln!("the companion can't read this ROM: no HUD to check");
+            return;
+        };
+        assert!(Core::wide_knows(info.crc32), "the HUD's games are EXPAND's");
+        let dir = std::env::temp_dir().join(format!("adventurepad-hud-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = std::env::var_os("ADVENTUREPAD_TEST_SAVE")
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let to = dir.join("copy.sav");
+                std::fs::copy(s, &to).unwrap();
+                to
+            });
+        let mut core = Core::open(&rom, save.as_deref()).unwrap();
+        // A save state to start from (copied): somewhere further in than a save gets by pressing buttons.
+        if let Some(state) = std::env::var_os("ADVENTUREPAD_TEST_STATE").filter(|s| !s.is_empty()) {
+            let to = dir.join("copy.state");
+            std::fs::copy(state, &to).unwrap();
+            assert!(core.load_state(&to), "the state loads");
+        }
+        assert!(core.wide_configure(info.crc32));
+        let mut camera = crate::wide::Camera::new();
+        let mut audio = vec![0i16; 8192];
+        let mut field_frames = 0u32;
+        let mut scenes = [0u32; 8];
+        // (EXPAND's cue, the HUD shown with it, shown without it, in a battle) per memory copy.
+        let mut seen = Vec::new();
+        for f in 0u32..9000 {
+            let keys = match (f / 40) % 10 {
+                _ if f % 40 >= 6 && (f / 40) % 10 < 5 => 0,
+                0 | 5 => mgba_sys::key::A,
+                1 => mgba_sys::key::START,
+                2 | 6 => mgba_sys::key::DOWN,
+                3 | 7 => mgba_sys::key::LEFT,
+                4 | 8 => mgba_sys::key::B,
+                _ => mgba_sys::key::RIGHT,
+            };
+            let win = camera.frame(1920.0, 1080.0, core.wide_scene(), 1.0 / 60.0);
+            if let Some(w) = win {
+                core.wide_set_view(w.x, w.y, w.w, w.h);
+            }
+            core.set_keys(keys);
+            core.run_frame();
+            core.read_audio(&mut audio);
+            scenes[core.wide_scene().clamp(0, 7) as usize] += 1;
+            field_frames = if core.wide_scene() == crate::wide::SCENE_FIELD {
+                field_frames + 1
+            } else {
+                0
+            };
+            if f % 15 == 0 {
+                let cue = if field_frames >= crate::hud::FIELD_SETTLE_FRAMES {
+                    crate::hud::FIELD_YES
+                } else {
+                    crate::hud::FIELD_NO
+                };
+                let m = copy_memory(&mut core, info.platform, &info.rom, f as u64);
+                hud.feed(&m);
+                let style = crate::hud::HudStyle::default();
+                seen.push((
+                    cue,
+                    hud.shown_for_test(&style, cue),
+                    hud.shown_for_test(&style, crate::hud::FIELD_UNKNOWN),
+                    hud.in_battle_for_test(),
+                ));
+            }
+        }
+        eprintln!("scenes (field, text, overlay, battle start, off, fade, menu): {scenes:?}");
+        let with = seen.iter().filter(|s| s.1).count();
+        let field = seen.iter().filter(|s| s.0 == crate::hud::FIELD_YES).count();
+        let battles = seen.iter().filter(|s| s.3).count();
+        let agree = seen.iter().filter(|s| s.1 && s.2).count();
+        let fallback_extra = seen.iter().filter(|s| !s.1 && s.2).count();
+        eprintln!(
+            "{} copies: {field} on the overworld, HUD shown in {with}; without EXPAND shown in {agree} of those (+{fallback_extra} \
+             elsewhere); {battles} in a battle",
+            seen.len()
+        );
+        if field == 0 || !hud.has_party_for_test() {
+            eprintln!("never reached the overworld with a party (a save or a state there?): nothing to check");
+            return;
+        }
+        assert!(with > 50, "the HUD came up on the overworld");
+        assert!(
+            seen.iter().all(|s| !s.1 || s.0 == crate::hud::FIELD_YES),
+            "only on the overworld"
+        );
+        assert!(
+            seen.iter().all(|s| !s.3 || (!s.1 && !s.2)),
+            "never in a battle"
+        );
+        assert!(
+            agree * 10 >= with * 8,
+            "without EXPAND it mostly agrees ({agree} of {with})"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 mgba-sys = { path = "../mgba-sys" }
 adventurepad-sdk = { path = "../sdk" }
+companion = { path = "../companion" }
 panels-pokemon = { path = "../panels-pokemon" }
 panels-tools = { path = "../panels-tools" }
 eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "persistence"] }

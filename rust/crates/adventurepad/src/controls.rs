@@ -32,11 +32,13 @@ pub enum Control {
     LookDown,
     LookLeft,
     LookRight,
+    /// The HUD over the game, on and off.
+    Hud,
 }
 
 impl Control {
     /// In the order SETTINGS lists them.
-    pub const ALL: [Control; 21] = [
+    pub const ALL: [Control; 22] = [
         Control::Up,
         Control::Down,
         Control::Left,
@@ -58,6 +60,7 @@ impl Control {
         Control::LookDown,
         Control::LookLeft,
         Control::LookRight,
+        Control::Hud,
     ];
 
     pub fn label(self) -> &'static str {
@@ -83,6 +86,7 @@ impl Control {
             Control::LookDown => "LOOK DOWN (EXPAND)",
             Control::LookLeft => "LOOK LEFT (EXPAND)",
             Control::LookRight => "LOOK RIGHT (EXPAND)",
+            Control::Hud => "HUD (on / off)",
         }
     }
 
@@ -126,6 +130,7 @@ impl Control {
             Control::LookDown => Key::K,
             Control::LookLeft => Key::J,
             Control::LookRight => Key::L,
+            Control::Hud => Key::H,
         }
     }
 }

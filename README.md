@@ -7,9 +7,13 @@
 > work hasn't started yet.
 >
 > It's an **early preview**. Today it plays any Game Boy, Game Boy Color or GBA game, reads retail FireRed,
-> LeafGreen and Emerald for its PARTY, BATTLE and BAG panels, and fast-forwards with the music at its normal
-> speed. Most of the Android app's features aren't ported yet: [rust/PARITY.md](rust/PARITY.md) tracks them, and
-> there are no release builds yet (build it from [rust/README.md](rust/README.md)).
+> LeafGreen and Emerald for its PARTY, BATTLE and BAG panels and a clickable HUD over the game, draws the
+> overworld wide (EXPAND), and fast-forwards with the music at its normal speed. Most of the Android app's
+> features aren't ported yet: [rust/TODO.md](rust/TODO.md) tracks them.
+>
+> **Download:** the [Adventure Pad releases](https://github.com/Zevrov/GBos/releases) (tags `adventurepad-v*`):
+> unzip `AdventurePad-<version>-windows-x64.zip` and run `AdventurePad.exe` (Windows 10 or 11, 64-bit). Each
+> release has the Windows app's own source beside it; to build it yourself, see [rust/README.md](rust/README.md).
 >
 > Everything below this note is PokeDaisy's own README for its Android app, which is still in this repository;
 > its download and support links go to PokeDaisy. **Based on PokeDaisy by Lidor Itzhari -

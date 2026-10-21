@@ -56,6 +56,17 @@ pub struct Window {
     pub scale: f32,
 }
 
+impl Window {
+    /// Where the area-name banner goes in the window (its pixels): its top-left as much of it as the view shows,
+    /// below the `top_clear` screen pixels the bar of buttons covers. The game draws it at the frame's corner, which
+    /// EXPAND puts towards the middle of the view.
+    pub fn banner_at(&self, top_clear: f32) -> (i32, i32) {
+        let x = (-self.off_x / self.scale).ceil().max(0.0);
+        let y = ((top_clear - self.off_y) / self.scale).ceil().max(0.0);
+        (x as i32, y as i32)
+    }
+}
+
 #[derive(Default)]
 pub struct Camera {
     /// The zoom step picked: 0 = 1x.

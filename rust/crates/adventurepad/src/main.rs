@@ -3,9 +3,11 @@
 
 mod app;
 mod audio;
+mod battle_input;
 mod controls;
 mod crash;
 mod emu;
+mod hud;
 mod music;
 mod panels;
 mod saves;

@@ -66,6 +66,12 @@ void pd_core_wide_set_draw(PdCore* c, bool draw);
 const uint8_t* pd_core_wide_pixels(const PdCore* c, int* w, int* h);
 int pd_core_wide_scene(const PdCore* c);
 unsigned long pd_core_wide_fault(const PdCore* c);
+/* The area-name banner (the games slide it in at the frame's top-left) drawn at (x, y) of the window instead, with
+ * the map in its place on the frame; x or y < 0 leaves it where the game puts it (the default). */
+void pd_core_wide_set_banner(PdCore* c, int x, int y);
+/* The banner's pixels the last frame moved (112 x 40 bytes, 1 = a banner pixel, of the frame's top-left), or NULL
+ * when it didn't move one. */
+const uint8_t* pd_core_wide_banner(const PdCore* c);
 
 /* The fault guard (Windows): a helper core runs its frames, calls and state loads guarded, and a fault leaves it
  * dead (every call a no-op, never torn down) instead of taking the process down; EXPAND always runs guarded. The

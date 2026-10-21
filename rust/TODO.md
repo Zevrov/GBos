@@ -15,12 +15,18 @@ Effort: **S** a session or less · **M** a few sessions · **L** a big port.
       or connected while a game runs. Every game button and hotkey rebindable to a pad button in CONTROLS. The right
       stick drives EXPAND's look-around and its click is ZOOM, as on Android. X / Y as a second START / SELECT.
       HOME / guide works like BACK for the panels.
-- [ ] **HUD over the game, clickable with the mouse** (L): your party (levels, HP, status), a minimap, your Poké
-      Balls and BAG / WILD buttons on the game view while you walk around. A click opens a Pokémon's summary, the
-      whole map (with FLY), a compact bag with USE, or the area's wild Pokémon; the game keeps running under them.
-      Three layouts (corners, side rails, a bottom dock), two looks (see-through glass, the app's windows), three
-      sizes, each part can be hidden. Steps aside for battles, menus and (with EXPAND) conversations.
-      (`FieldHud.kt`)
+- [ ] **HUD over the game, clickable with the mouse** (L) (`FieldHud.kt`; `hud.rs`)
+  - [x] Your party (levels, HP, status), your Poké Balls and BAG on the game view while you walk around; a click
+        opens a Pokémon's summary or a compact bag, and the game keeps running under them.
+  - [x] Four layouts (CORNERS, CORNERS 2, RAILS, DOCK), three looks (GLASS, WHITE GLASS, WINDOW), three sizes, each
+        part can be hidden; H turns it on and off.
+  - [x] Steps aside for battles, menus and (with EXPAND) conversations.
+  - [ ] Party icons (the ROM's own, `RomArt`) and ball / item icons in place of the drawn ones.
+  - [ ] A minimap, and the whole map with FLY (with MAP's tables, `pd_map.c`).
+  - [ ] WILD: the area's wild Pokémon (GUIDE's encounter tables).
+  - [ ] USE in the compact bag (it writes to the game: `ItemUse`, through `pd_core_call`).
+  - [ ] REPEL steps and PC, as on Android.
+  - [x] EXPAND: the area-name banner at the screen's corner, not the game frame's (new here: Android leaves it).
 
 ## The panels (the companion)
 
@@ -39,8 +45,10 @@ Effort: **S** a session or less · **M** a few sessions · **L** a big port.
   - [ ] INFO: the foe's weaknesses; scrolling down, its ability, held item, stats (with boosts) and moves; a corner
         button gives the foe the whole page.
   - [ ] STATS: the foe's IVs, EVs and nature next to yours (off by default: FOE IVS in SETTINGS).
-  - [ ] FIGHT / switch / RUN buttons, clickable (FireRed and Emerald: `BattleInputController.kt`; `pd_core_call`
-        is ported).
+  - [x] FIGHT / switch / RUN buttons, clickable (`battle_input.rs`, from `BattleInputController.kt`; presses only).
+        A move and RUN checked headless on Emerald; the switch is Android's closed loop, not yet checked here (no
+        save with two Pokémon in a battle).
+  - [ ] Battle buttons for doubles, Ruby / Sapphire, the other languages and the hacks Android drives.
 - [ ] **MAP** (M): the game's region map with you on it; click a place to name it, or search every town and route.
       (`3ds/core/pd_map.c`, `MapScreen.kt`)
 - [ ] **DEX** (L): seen / caught, and full entries: sprite, types, stats, abilities, dex text, how it evolves (the
