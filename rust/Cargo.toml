@@ -1,0 +1,23 @@
+# Adventure Pad: a Game Boy / GBA player with modular companion panels, in Rust. See README.md.
+[workspace]
+resolver = "2"
+members = [
+    "crates/mgba-sys",
+    "crates/companion",
+    "crates/sdk",
+    "crates/panels-pokemon",
+    "crates/panels-tools",
+    "crates/adventurepad",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[profile.dev.package."*"]
+# The emulator core and the UI crates run far too slowly unoptimized to play.
+opt-level = 2
+
+[profile.release]
+lto = "thin"

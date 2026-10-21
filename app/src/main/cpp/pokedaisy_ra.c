@@ -67,7 +67,11 @@ static pthread_mutex_t ra_pumpLock = PTHREAD_MUTEX_INITIALIZER;
 static JNIEnv* raEnv(void) {
     JNIEnv* env = NULL;
     if ((*ra_vm)->GetEnv(ra_vm, (void**) &env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+#ifdef __ANDROID__
         (*ra_vm)->AttachCurrentThread(ra_vm, &env, NULL);
+#else   // the desktop JDK's jni.h takes a void** here
+        (*ra_vm)->AttachCurrentThread(ra_vm, (void**) &env, NULL);
+#endif
     }
     return env;
 }

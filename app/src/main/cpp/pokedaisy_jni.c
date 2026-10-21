@@ -156,13 +156,15 @@ static void pkTeardown(void) {
     pkRewindOff();
     if (g.core) {
         pk_cheats_clear(g.core);        // and forgets the ROM bytes it kept
-        g.core->deinit(g.core);         // unloads ROM, flushes save VFile
+        // Unloads the ROM and flushes the save. The core owns g.saveVf from loadSave on
+        // and closes it here (GBADestroy: savedata.realVf, GBDestroy: sramRealVf), so
+        // closing it again after was a double free.
+        g.core->deinit(g.core);
         g.core = NULL;
+    } else if (g.saveVf) {
+        g.saveVf->close(g.saveVf);      // no core ever took it
     }
-    if (g.saveVf) {
-        g.saveVf->close(g.saveVf);
-        g.saveVf = NULL;
-    }
+    g.saveVf = NULL;
     g.saveReadOnly = false;
     free(g.video);
     g.video = NULL;

@@ -1,0 +1,10 @@
+[package]
+name = "panels-pokemon"
+description = "Adventure Pad's Pokemon panels: PARTY, BATTLE and BAG for the Gen 3 games"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adventurepad-sdk = { path = "../sdk" }
+companion = { path = "../companion" }

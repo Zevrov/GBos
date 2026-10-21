@@ -1,0 +1,9 @@
+[package]
+name = "panels-tools"
+description = "Adventure Pad's developer panels: a memory viewer and watch list for any game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+adventurepad-sdk = { path = "../sdk" }
