@@ -29,7 +29,7 @@ Effort: **S** a session or less · **M** a few sessions · **L** a big port (man
 | **Status bar** (game, place, money, clock) | — | `GameStatusBar.kt` | S |
 | **HUD** over the game (party, minimap, balls, BAG / WILD) | — | `FieldHud.kt` (Compose: rewrite in egui) | L |
 | **Battle buttons** (FIGHT / POKéMON / RUN) | — | `BattleButtons.kt`, `BattleInputController.kt` | M |
-| **EXPAND** (overworld past the GBA's edges), ZOOM, look-around | — | `pk_wide.c` (C, ~2,100 lines, reusable) + `WideCamera.kt` | M |
+| **EXPAND** (overworld past the GBA's edges), ZOOM, look-around | ✅ (look-around on keys until gamepads; no fault guard on Windows yet) | `pk_wide.c` as is + `wide.rs` (WideCamera.kt) | |
 | Aspect: native / stretch | ◐ native (integer scaled) | | S |
 | **Shaders** (LCD, scanlines, CRT, GBA colours, xBRZ...) | — | `ScreenShaders.kt` (GLSL: port to egui's glow) | M |
 | **Overlays** (RetroArch .cfg / PNG frames) | — | `overlay/` | M |

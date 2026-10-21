@@ -76,6 +76,13 @@ prints what the companion reads.
   game's RAM comes out byte for byte as without it (FireRed, Emerald, Lazarus, Emerald Rogue), and nothing is
   written to a game whose sound engine doesn't look like the one the mute knows (it gets the music alone).
   Other games get their own sound at its normal pitch, in slices that skip ahead.
+- **SCREEN**: **EXPAND**, the overworld drawn past the GBA's edges, so a wide window shows more of the map
+  with the pixels kept square: the Android app's own `pk_wide.c`, compiled in (FireRed, LeafGreen, Emerald,
+  Ruby and Sapphire in every language and revision, and the ROM hacks it has tables for). **ZOOM** steps out
+  to see more and eases back in for battles (and, if you like, text boxes and menus); the **look-around** keys
+  move the view, which glides back to you when you walk. It only reads the game: the
+  `expand_draws_wide_and_leaves_the_game_alone` test checks the game's RAM comes out identical. A fault in
+  `pk_wide.c` switches EXPAND off for the game instead of closing the app (the fault guard, below).
 - **PANELS**: the panels in their own window (for a second screen); the developer panels.
 - **SAVES**: the saves folder (the synced folder for cloud saves).
 
@@ -88,7 +95,25 @@ prints what the companion reads.
 | Tab (hold) / Space | Fast-forward held / on-off |
 | F5 / F7 | Save / load the selected state slot |
 | F6 / F8 | Previous / next slot |
+| Q | ZOOM (EXPAND) |
+| I / J / K / L | Look around (EXPAND) |
 | Esc | Leaves SETTINGS |
+
+## When something goes wrong
+
+- **The fault guard** (`pd_core.c`, Windows): what `pk_wide.c`'s POSIX signal guard does on Android, as a
+  vectored exception handler. EXPAND always runs under it, and so do fast-forward's two helper cores (the music
+  core and the shadow copy). A crash in one of them switches that feature off (EXPAND off for the game, the
+  music or the effects back to the game's own sound) and the game plays on. The player's own game isn't
+  guarded: a crash in it can't be safely carried on from.
+- **A panic in the emulator thread** ends the game with a message instead of a frozen window; the in-game saves
+  are already in the save file.
+- **`crash.log`** in the app's folder (`%APPDATA%\AdventurePad`) gets every panic (with a backtrace) and any
+  native crash nothing caught (the exception, and the module + offset where it happened); a crash that closed
+  the app is mentioned in the library on the next launch.
+
+The tests make each of these happen on purpose (`guard.rs`, `a_fault_in_expand_switches_it_off_...`,
+`a_dead_music_core_goes_quiet`, `a_panic_in_the_emulator_ends_the_game_cleanly`).
 
 ## Cloud saves
 

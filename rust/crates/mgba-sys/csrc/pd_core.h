@@ -54,6 +54,31 @@ void pd_core_enable_audio_channel(PdCore* c, int id, bool enable);
 bool pd_core_state_to_memory(PdCore* c, uint8_t** out, size_t* len);
 bool pd_core_state_from_memory(PdCore* c, const uint8_t* data, size_t len);
 void pd_core_free(void* p);
+/* EXPAND (pk_wide.c): whether it has tables for the ROM with this CRC32; draw that game (0 = off; false if it can't);
+ * the window to draw from the next frame on, in the frame's pixels (w 0 = none); whether the next frame is shown;
+ * the last frame's window (RGBX, w * h; NULL when it wasn't drawn wide); what it is (PK_WIDE_SCENE_*: 0 the field,
+ * 1 a text box, 2 a picture over the field, 3 a battle starting, 4 off the map, 5 a fade, 6 a menu); the signal that
+ * switched it off (0 = none). It reads the game and never writes to it. */
+bool pd_core_wide_knows(uint32_t crc);
+bool pd_core_wide_configure(PdCore* c, uint32_t crc);
+void pd_core_wide_set_view(PdCore* c, int x, int y, int w, int h);
+void pd_core_wide_set_draw(PdCore* c, bool draw);
+const uint8_t* pd_core_wide_pixels(const PdCore* c, int* w, int* h);
+int pd_core_wide_scene(const PdCore* c);
+unsigned long pd_core_wide_fault(const PdCore* c);
+
+/* The fault guard (Windows): a helper core runs its frames, calls and state loads guarded, and a fault leaves it
+ * dead (every call a no-op, never torn down) instead of taking the process down; EXPAND always runs guarded. The
+ * fault is a Windows exception code (0xC0000005 an access violation), 0 = none. pd_core_test_fault: a fault inside
+ * the core's guarded work, for tests; pd_core_guard_selftest: one on its own (returns its code). */
+void pd_core_set_guarded(PdCore* c, bool guarded);
+unsigned long pd_core_dead(const PdCore* c);
+void pd_core_test_fault(PdCore* c);
+void pd_core_wide_test_fault(PdCore* c);
+unsigned long pd_core_guard_selftest(void);
+/* A native crash nothing caught goes to the log at `log` (a line: the exception and where), and leaves the file
+ * `flag` for the next launch. UTF-8 paths; Windows only. */
+void pd_crash_log_install(const char* log, const char* flag);
 /* Parks the main loop on the Thumb `b .` at `spin`, the VBlank interrupt (and so the sound engine) running on. */
 bool pd_core_park(PdCore* c, uint32_t spin);
 
