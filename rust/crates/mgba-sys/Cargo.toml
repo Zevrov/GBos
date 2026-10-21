@@ -1,0 +1,13 @@
+[package]
+name = "mgba-sys"
+description = "libmgba (the repo's submodule) behind a small flat C shim, and a safe Rust Core over it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+links = "pd_core"
+
+[build-dependencies]
+cmake = "0.1"
+
+[dev-dependencies]
+companion = { path = "../companion" }

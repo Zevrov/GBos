@@ -262,9 +262,9 @@ static void rememberObjects(const struct Snap* s) {
     for (int i = 0; i < MAX_SEEN; i++) {
         struct Seen* e = &seenObjects[i];
         if (!e->used || (e->group == s->group && e->num == s->num)) continue;
-        bool near = false;
-        for (int c = 0; c < s->nconn && !near; c++) near = s->conn[c].group == e->group && s->conn[c].num == e->num;
-        if (!near) e->used = false;
+        bool adjacent = false;
+        for (int c = 0; c < s->nconn && !adjacent; c++) adjacent = s->conn[c].group == e->group && s->conn[c].num == e->num;
+        if (!adjacent) e->used = false;
     }
     for (int k = 0; k < 16; k++) {
         const uint8_t* oe = s->objects + 0x24 * k;
@@ -1676,9 +1676,9 @@ static uint32_t glowAt(const uint32_t* frame, int X, int Y, const int reach[4], 
     int at = across ? clampi(Y, 0, PK_WIDE_H - 1) : clampi(X, 0, PK_WIDE_W - 1);
     int32_t (*pre)[3] = across ? preH[side] : preV[side];
     uint32_t exact = across ? frame[at * PK_WIDE_W + (side ? PK_WIDE_W - 1 : 0)] : frame[(side ? PK_WIDE_H - 1 : 0) * PK_WIDE_W + at];
-    int far = reach[across ? side : 2 + side];
+    int reachOut = reach[across ? side : 2 + side];
     int r = 2 + d * 3 / 4;                                            // the glow spreads as it goes out
-    int bright = 256 - 136 * (d - 1) / (far > 1 ? far - 1 : 1);       // 1.0 at the game's edge -> ~0.47 at the window's
+    int bright = 256 - 136 * (d - 1) / (reachOut > 1 ? reachOut - 1 : 1);       // 1.0 at the game's edge -> ~0.47 at the window's
     if (bright < 120) bright = 120;
     int seam = d >= 4 ? 256 : d * 64;                                 // the first pixels lean on the edge itself
     int lo = at - r < 0 ? 0 : at - r, hi = at + r >= len ? len - 1 : at + r;
