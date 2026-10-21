@@ -2,7 +2,10 @@
 
 A native Windows Game Boy, Game Boy Color and GBA player: one `AdventurePad.exe`, no runtime to install.
 The game runs on the repo's mGBA submodule (compiled in), with an extra screen of **panels** beside it (or in
-a window of its own, for a second monitor) and cloud saves through a synced folder. Early preview.
+a window of its own, for a second monitor) and cloud saves through a synced folder.
+
+**Work in progress.** Windows first, **iOS planned** next (not started). What the Android app does and this
+doesn't yet is tracked in [PARITY.md](PARITY.md); there are no release builds yet, so build it as below.
 
 **Based on PokeDaisy by Lidor Itzhari - https://github.com/lidor30/pokedaisy**
 
