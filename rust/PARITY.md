@@ -1,6 +1,7 @@
 # Adventure Pad vs PokeDaisy (Android): feature parity
 
-Where the Windows app stands against the Android app's features (its README and `docs/ROM_FEATURES.md`), and
+The working list of what's next is [TODO.md](TODO.md). This page: where the Windows app stands against the
+Android app's features (its README and `docs/ROM_FEATURES.md`), and
 what in this repo each one can be built from, which mostly decides the effort.
 
 ✅ done · ◐ partly · — missing · n/a doesn't apply on a PC
