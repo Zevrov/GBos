@@ -1,3 +1,20 @@
+> [!NOTE]
+> **GBos: a work-in-progress port of PokeDaisy to Rust, for Windows first, then iOS.**
+>
+> This fork is rebuilding PokeDaisy as **Adventure Pad**, a native Windows app written in Rust: one `.exe`, no
+> runtime to install, with the companion as modular **panels** beside the game (or on a second monitor) and
+> **cloud saves** through a OneDrive, Dropbox, Google Drive or iCloud Drive folder. **iOS is planned next**; that
+> work hasn't started yet.
+>
+> It's an **early preview**. Today it plays any Game Boy, Game Boy Color or GBA game, reads retail FireRed,
+> LeafGreen and Emerald for its PARTY, BATTLE and BAG panels, and fast-forwards with the music at its normal
+> speed. Most of the Android app's features aren't ported yet: [rust/PARITY.md](rust/PARITY.md) tracks them, and
+> there are no release builds yet (build it from [rust/README.md](rust/README.md)).
+>
+> Everything below this note is PokeDaisy's own README for its Android app, which is still in this repository;
+> its download and support links go to PokeDaisy. **Based on PokeDaisy by Lidor Itzhari -
+> https://github.com/lidor30/pokedaisy**
+
 <div align="center">
 
 <img src="https://pokedaisy.com/og.png" alt="PokeDaisy: Game Boy, Game Boy Color and GBA player with a live companion, on two screens or one, for Pokemon games and ROM hacks, free and open source" width="100%">
