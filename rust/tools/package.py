@@ -5,16 +5,18 @@
 Builds `AdventurePad.exe` (release; needs the toolchain on PATH, as rust/README.md's Build says) and writes to
 `rust/target/dist/`:
 
+- `AdventurePad.exe`: the app on its own - download it, double-click it.
 - `AdventurePad-<version>-windows-x64.zip`: the app's folder - AdventurePad.exe with README, LICENSE and NOTICE.
   One exe, no installer, no DLLs beside it (the build is checked for any it would need).
 - `AdventurePad-<version>-source.zip`: what builds it - rust/, the mGBA submodule, and the two EXPAND files the
   build takes from app/src/main/cpp (pk_wide.c and its headers) - with LICENSE and NOTICE. The GPL's source for
   the app, without the Android project around it. The files git has, or would take (not ignored ones).
-- `SHA256SUMS.txt` for both.
+- `SHA256SUMS.txt` for all three.
 """
 
 import hashlib
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -100,6 +102,9 @@ def main():
         sys.exit(f"no {exe}: build it first")
     check_dlls(exe)
     DIST.mkdir(parents=True, exist_ok=True)
+    bare = DIST / "AdventurePad.exe"
+    shutil.copyfile(exe, bare)
+    print(f"{bare.name}: {bare.stat().st_size / 1e6:.1f} MB")
 
     app = DIST / f"AdventurePad-{ver}-windows-x64.zip"
     write_zip(
@@ -128,7 +133,7 @@ def main():
     src = DIST / f"{top}.zip"
     write_zip(src, files)
 
-    sums = "".join(f"{hashlib.sha256(z.read_bytes()).hexdigest()}  {z.name}\n" for z in (app, src))
+    sums = "".join(f"{hashlib.sha256(z.read_bytes()).hexdigest()}  {z.name}\n" for z in (bare, app, src))
     (DIST / "SHA256SUMS.txt").write_text(sums, encoding="utf-8")
     print(f"in {DIST}")
 

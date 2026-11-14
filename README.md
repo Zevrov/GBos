@@ -12,7 +12,7 @@
 > features aren't ported yet: [rust/TODO.md](rust/TODO.md) tracks them.
 >
 > **Download:** the [Adventure Pad releases](https://github.com/Zevrov/GBos/releases) (tags `adventurepad-v*`):
-> unzip `AdventurePad-<version>-windows-x64.zip` and run `AdventurePad.exe` (Windows 10 or 11, 64-bit). Each
+> download `AdventurePad.exe` and double-click it (Windows 10 or 11, 64-bit). Each
 > release has the Windows app's own source beside it; to build it yourself, see [rust/README.md](rust/README.md).
 >
 > Everything below this note is PokeDaisy's own README for its Android app, which is still in this repository;

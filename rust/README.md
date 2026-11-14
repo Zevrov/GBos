@@ -8,8 +8,8 @@ a window of its own, for a second monitor) and cloud saves through a synced fold
 doesn't yet is in [TODO.md](TODO.md) (and [PARITY.md](PARITY.md)).
 
 **Download:** the [Adventure Pad releases](https://github.com/Zevrov/GBos/releases) (tags `adventurepad-v*`, not
-the Android app's `v*`): unzip `AdventurePad-<version>-windows-x64.zip` anywhere and run `AdventurePad.exe`. It's
-one exe on Windows 10 or 11 (64-bit), unsigned for now, so SmartScreen may ask first (More info > Run anyway).
+the Android app's `v*`): download `AdventurePad.exe` and double-click it (or the zip, with the README and licenses).
+It's one exe on Windows 10 or 11 (64-bit), unsigned for now, so SmartScreen may ask first (More info > Run anyway).
 Settings, states and the default saves folder are in `%APPDATA%\AdventurePad`.
 
 **Based on PokeDaisy by Lidor Itzhari - https://github.com/lidor30/pokedaisy**
@@ -59,7 +59,7 @@ The app is `rust/target/release/AdventurePad.exe`. Pass a ROM path to open it at
 `cargo run --release -p mgba-sys --example headless -- <rom> <save> [frames]` boots a ROM with no window and
 prints what the companion reads.
 
-**A release:** `python rust/tools/package.py` builds the exe and writes `rust/target/dist/`: the app's zip (the exe
+**A release:** `python rust/tools/package.py` builds the exe and writes `rust/target/dist/`: the exe itself, the app's zip (the exe
 with this README, LICENSE and NOTICE; it checks the exe needs no DLLs beyond Windows' own), a source zip of just
 what builds it (`rust/`, the mGBA submodule, EXPAND's `pk_wide.c` from `app/src/main/cpp`) and `SHA256SUMS.txt`.
 Tag it `adventurepad-v<version>` (the workspace's version in `rust/Cargo.toml`): `v*` tags are the Android app's
